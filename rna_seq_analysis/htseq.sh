@@ -14,18 +14,22 @@ module load hisat2/2.2.1
 module load python/3.10
 
 echo "Generating virtual environment"
-#ENVDIR=/tmp/$RANDOM
-#virtualenv --no-download $ENVDIR
-#source $ENVDIR/bin/activate
-#pip install --no-index --upgrade pip
-#pip install --no-index numpy
-#pip install msgpack
-#pip install packaging
-#pip install blosc2
-#pip install tables
-#pip install HTSeq
-#pip freeze --local > requirements.txt
-#deactivate
+ENVDIR=/tmp/$RANDOM
+virtualenv --no-download $ENVDIR
+source $ENVDIR/bin/activate
+pip install --no-index --upgrade pip
+pip install --no-index numpy
+pip install msgpack
+pip install packaging
+pip install blosc2
+pip install tables
+pip install HTSeq
+pip install biomart
+pip install --no-index loguru
+pip install --no-index pandas
+pip install --no-index biopython
+pip freeze --local > requirements.txt
+deactivate
 
 echo "activating temporary environment"
 module load python/3.10
@@ -41,18 +45,17 @@ if [ ! -d $VENV ]; then
     exit 1
 fi
 
-# hisat2-build -p 32 "data/GCF_000001405.40_GRCh38.p14_genomic.fna" "ref_genome/ref_gen"
+hisat2-build -p 32 "data/GCF_000001405.40_GRCh38.p14_genomic.fna" "ref_genome/ref_gen"
 
 # Activate the virtual environment
 source $VENV/bin/activate
 echo "Successfully activated virtual environment"
 
 # Generate ht-seq raw read counts
-echo "Generating ht-seq raw read counts for SRR ID: SRR3393492.sam"
+echo "Generating ht-seq raw read counts"
 hisat2 -p 32 -x ref_genome/ref_gen -U "fastq_files/SRR3393492.fastq" -S "alignment/SRR3393492.sam"
 htseq-count "alignment/SRR3393492.sam" "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz" -f sam -r pos -i gene_id -t exon -n 32 > "transcripts/SRR3393492.csv"
 echo "ht-seq raw read counts for SRR3393523.sam already exist. Skipping read count generation."
-
 
 # Deactivate and remove the virtual environment
 deactivate
