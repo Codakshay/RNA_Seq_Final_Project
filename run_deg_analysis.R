@@ -13,7 +13,7 @@ library(ggrepel)
 # Step I: Preparing count data --------------------------------------------
 
 # Load RNA-Seq data
-counts_data <- read.csv("GSE80336_Counts.csv", stringsAsFactors = FALSE)
+counts_data <- read.csv("data/counts.csv", stringsAsFactors = FALSE)
 rownames(counts_data) <- counts_data$Ensembl_ID  # Set Ensemble ID as rownames
 counts_data <- counts_data[, -c(1:4)]  # Drop metadata columns
 

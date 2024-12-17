@@ -1,6 +1,7 @@
-rna_seq_analysis/data/
-rna_seq_analysis/alignment/
-rna_seq_analysis/fastq_files/
-rna_seq_analysis/ref_genome/
-rna_seq_analysis/transcripts/
+data/
+alignment/
+fastq_files/
+logs/
+ref_genome/
+transcripts/
 

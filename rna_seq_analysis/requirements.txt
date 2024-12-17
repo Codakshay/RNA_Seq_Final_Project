@@ -1,5 +1,0 @@
-HTSeq==2.0.2+computecanada
-msgpack==1.1.0+computecanada
-numpy==1.26.4+computecanada
-packaging==24.2+computecanada
-pysam==0.22.1+computecanada

@@ -61,4 +61,3 @@ echo "ht-seq raw read counts for SRR3393523.sam already exist. Skipping read cou
 deactivate
 echo "deactivated"
 rm -rf $VENV
-

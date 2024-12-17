@@ -88,7 +88,7 @@ def generate_ensemble_dataframe():
     df = pd.DataFrame(results, columns=["Ensembl Gene ID", "Gene Symbol", "Biotype", "Chromosome"])
 
     # save the dataframe as a pickle file
-    df.to_pickle("rna_seq_analysis/ensemble_df.pkl")
+    df.to_pickle("rna_seq_analysis/data/ensemble_df.pkl")
     return 0
 
 def generate_count_dataframe():
@@ -96,14 +96,14 @@ def generate_count_dataframe():
     directory = 'rna_seq_analysis/transcripts'
     # Get the list of all filenames in the directory
     filenames = os.listdir(directory)
-    ensemble_df = pd.read_pickle("rna_seq_analysis/ensemble_df.pkl")
+    ensemble_df = pd.read_pickle("rna_seq_analysis/data/ensemble_df.pkl")
     for filename in filenames:
         full_path = os.path.join(directory, filename)
         geo_id = metadata.get_geo_accession_from_srr(filename[:filename.index(".csv")])
         transcript_dataframe = pd.read_csv(full_path, sep='\s+', header=None, names=["Gene Symbol", geo_id])
         ensemble_df = ensemble_df.merge(transcript_dataframe, how='inner', on="Gene Symbol")
     # save complete count dataframe into csv
-    ensemble_df.to_csv("rna_seq_analysis/counts.csv")
+    ensemble_df.to_csv("rna_seq_analysis/data/counts.csv")
     return 0
 
 
