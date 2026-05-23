@@ -2,7 +2,7 @@
 # Run the RNA-Seq DGE pipeline on a SLURM cluster.
 #
 # Usage:
-#   sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD]
+#   sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD] [--gpu]
 #
 # Arguments:
 #   PRJNA_ID        NCBI BioProject accession (e.g. PRJNA316873)
@@ -10,23 +10,50 @@
 #   GSE_ACCESSION   GEO Series accession for sample metadata (e.g. GSE80336)
 #   CONDITION_FIELD Column in GEO phenoData used to derive condition labels
 #                   (default: title)
+#   --gpu           Optional flag. When set, the job is submitted to a GPU node
+#                   and pipeline.smk uses NVIDIA Parabricks STAR for alignment.
 #
-# Example:
-#   sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
+# Examples:
+#   sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title          # CPU (HISAT2)
+#   sbatch run_pipeline.sh PRJNA316873 04:00:00 GSE80336 title --gpu    # GPU (Parabricks STAR)
 
 PROJECT_ID="${1:?Error: PRJNA_ID is required (e.g. PRJNA316873)}"
 TIME_LIMIT="${2:?Error: time limit is required (e.g. 24:00:00)}"
 GSE_ACCESSION="${3:?Error: GSE_ACCESSION is required (e.g. GSE80336)}"
-CONDITION_FIELD="${4:-title}"
+
+# CONDITION_FIELD is optional, --gpu is optional; either may appear in slot 4 or 5
+CONDITION_FIELD="title"
+USE_GPU=0
+for arg in "${@:4}"; do
+    case "$arg" in
+        --gpu) USE_GPU=1 ;;
+        *)     CONDITION_FIELD="$arg" ;;
+    esac
+done
 
 # Create logs/ on the host before sbatch so SLURM can write its own log files
 mkdir -p logs
+
+# Compose the aligner-specific bits
+if [ "$USE_GPU" -eq 1 ]; then
+    ALIGNER="parabricks_star"
+    SBATCH_GPU_LINE="#SBATCH --gres=gpu:v100:1"
+    EXTRA_MODULES="module load parabricks cuda star/2.7.10b subread/2.0.6 samtools/1.17"
+    echo "[run_pipeline.sh] GPU mode: aligner=parabricks_star, --gres=gpu:v100:1"
+else
+    ALIGNER="hisat2"
+    SBATCH_GPU_LINE="# (CPU mode — no GPU allocation)"
+    EXTRA_MODULES="module load hisat2/2.2.1 subread/2.0.6 samtools/1.17"
+    echo "[run_pipeline.sh] CPU mode: aligner=hisat2"
+fi
 
 # Generate config.yaml from the supplied arguments
 cat > config.yaml <<YAML
 project: ${PROJECT_ID}
 gse_accession: ${GSE_ACCESSION}
 condition_field: ${CONDITION_FIELD}
+aligner: ${ALIGNER}
+download_parallel: 4
 YAML
 
 # Create and submit the SLURM job script
@@ -38,14 +65,15 @@ cat > run_job.sbatch <<EOF
 #SBATCH --time=${TIME_LIMIT}
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=100G
+${SBATCH_GPU_LINE}
 
 set -euo pipefail
 
 echo "[pipeline] Loading modules..."
 module load sra-toolkit/3.0.9
-module load hisat2/2.2.1
 module load python/3.10
 module load r/4.2
+${EXTRA_MODULES}
 
 echo "[pipeline] Setting up Python virtual environment..."
 ENVDIR=\$(mktemp -d)
@@ -55,7 +83,7 @@ source "\$ENVDIR/bin/activate"
 pip install --no-index --upgrade pip
 pip install -r requirements.txt
 
-echo "[pipeline] Starting Snakemake workflow..."
+echo "[pipeline] Starting Snakemake workflow (aligner=${ALIGNER})..."
 snakemake \
     --snakefile pipeline.smk \
     --cores 32 \
