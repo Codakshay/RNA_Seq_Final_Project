@@ -1,0 +1,10 @@
+numpy
+pandas
+biopython
+loguru
+HTSeq
+biomart
+msgpack
+packaging
+blosc2
+tables
