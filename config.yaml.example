@@ -31,6 +31,11 @@ aligner: hisat2
 # throughput so values above ~4 yield diminishing returns.
 download_parallel: 4
 
+# BiocParallel workers for the DESeq2 dispersion fit. DESeq2 is CPU-only;
+# no GPU port exists. Realistic speedup is small (<1 min on 36 samples),
+# so 1 (serial) is a fine default. Worth bumping for studies with >100 samples.
+deseq_workers: 1
+
 # --- Optional: skip the NCBI reference download --------------------------
 # Absolute paths to a pre-staged FASTA/GTF (or their .gz equivalents). When
 # either key is non-empty the corresponding download rule is replaced by a

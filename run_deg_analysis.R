@@ -9,6 +9,7 @@ suppressPackageStartupMessages({
   library(RColorBrewer)
   library(pheatmap)
   library(ggrepel)
+  library(BiocParallel)
 })
 
 # Parse CLI arguments ----------------------------------------------------
@@ -28,7 +29,13 @@ option_list <- list(
               help = "Output CSV for ordered DEG results [default: deg_results.csv]"),
   make_option(c("--plots-dir"), type = "character", default = "data/plots",
               metavar = "DIR",
-              help = "Directory for output PNG plots [default: data/plots]")
+              help = "Directory for output PNG plots [default: data/plots]"),
+  make_option(c("--workers"), type = "integer", default = 1,
+              metavar = "N",
+              help = paste("BiocParallel worker count for the DESeq2 dispersion fit.",
+                           "DESeq2 is CPU-only (no GPU port exists); this gives a",
+                           "modest multi-core speedup on large datasets only.",
+                           "[default: 1]"))
 )
 
 opt <- parse_args(
@@ -42,6 +49,14 @@ if (is.null(opt$counts) || is.null(opt$gse)) {
 
 dir.create(opt$plots_dir, recursive = TRUE, showWarnings = FALSE)
 cat("Writing plots to:", opt$plots_dir, "\n")
+
+# Register the parallel backend used by DESeq2's parametric fit step.
+# MulticoreParam(1) is equivalent to serial and is the safe default; setting
+# workers > 1 forks N processes for the dispersion-fit and Wald-test loops.
+if (opt$workers > 1) {
+  register(MulticoreParam(workers = opt$workers))
+  cat("BiocParallel: registered MulticoreParam with", opt$workers, "workers.\n")
+}
 
 # Step I: Preparing count data -------------------------------------------
 counts_data <- read.csv(opt$counts, stringsAsFactors = FALSE, check.names = FALSE)
@@ -88,7 +103,9 @@ dds$condition <- relevel(dds$condition, ref = levels(dds$condition)[1])
 cat("Reference condition:", levels(dds$condition)[1], "\n")
 
 # Step III: Running DESeq2 -----------------------------------------------
-dds <- DESeq(dds)
+# parallel = TRUE forwards work to the BiocParallel backend registered above;
+# it's a no-op when workers == 1 (default).
+dds <- DESeq(dds, parallel = (opt$workers > 1))
 
 normalized_counts <- counts(dds, normalized = TRUE)
 
