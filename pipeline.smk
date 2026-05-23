@@ -139,16 +139,24 @@ rule align_reads:
         "hisat2 -p {threads} -x ref_genome/ref_gen -U {input.fastq} -S {output}"
 
 rule count_reads:
+    # featureCounts is ~10-20x faster than htseq-count on the same input;
+    # output is reduced to the (gene_id<TAB>count) two-column TSV that
+    # merge_transcripts.py already knows how to parse.
     input:
         sam = "alignment/{sample}.sam",
         gtf = "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz",
     output:
-        "transcripts/{sample}.csv",
-    threads: 32
+        counts  = "transcripts/{sample}.csv",
+    threads: 8
     shell:
         """
-        htseq-count -f sam -r pos -i gene_id -t exon -n {threads} \
-            {input.sam} {input.gtf} > {output}
+        featureCounts -T {threads} -a {input.gtf} \
+                      -t exon -g gene_id \
+                      -o {output.counts}.raw {input.sam}
+        # Strip featureCounts header lines (1: comment, 2: column names)
+        # and keep only Geneid (col 1) and the per-sample count (last col).
+        awk 'NR>2 {{print $1"\\t"$NF}}' {output.counts}.raw > {output.counts}
+        rm {output.counts}.raw {output.counts}.raw.summary
         """
 
 
