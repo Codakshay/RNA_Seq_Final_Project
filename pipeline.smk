@@ -12,6 +12,7 @@ DOWNLOAD_PARALLEL = int(config.get("download_parallel", 4))
 ALIGNER           = config.get("aligner", "hisat2").strip()
 assert ALIGNER in ("hisat2", "parabricks_star"), \
     f"config[aligner] must be 'hisat2' or 'parabricks_star', got {ALIGNER!r}"
+DESEQ_WORKERS     = int(config.get("deseq_workers", 1))
 
 # Plot filenames that run_deg_analysis.R will produce
 PLOT_NAMES = [
@@ -346,6 +347,7 @@ rule deg_analysis:
         gse             = GSE_ACCESSION,
         condition_field = CONDITION_FIELD,
         plots_dir       = "data/plots",
+        workers         = DESEQ_WORKERS,
     shell:
         """
         Rscript run_deg_analysis.R \
@@ -353,7 +355,8 @@ rule deg_analysis:
             --gse {params.gse} \
             --condition-field "{params.condition_field}" \
             --out {output.results} \
-            --plots-dir {params.plots_dir}
+            --plots-dir {params.plots_dir} \
+            --workers {params.workers}
         """
 
 
