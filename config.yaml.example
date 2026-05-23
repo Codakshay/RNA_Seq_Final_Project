@@ -19,6 +19,13 @@ gse_accession: GSE80336
 condition_field: title
 
 # --- Performance / execution mode -----------------------------------------
+# Aligner:
+#   hisat2          — CPU alignment (default; reproduces the published case study)
+#   parabricks_star — GPU alignment via NVIDIA Parabricks (rna_fq2bam). Requires
+#                     a GPU SLURM allocation (--gres=gpu:1) and parabricks module.
+#                     run_pipeline.sh sets this automatically when invoked with --gpu.
+aligner: hisat2
+
 # Number of concurrent fasterq-dump processes during the SRA download phase.
 # Each child uses 8 worker threads, so 4 × 8 = 32 cores. NCBI throttles per-IP
 # throughput so values above ~4 yield diminishing returns.
