@@ -1,3 +1,13 @@
+"""Merge per-sample htseq-count CSV files into an annotated count matrix.
+
+Usage (called by Snakemake rule merge_results):
+    python3 merge_transcripts.py \
+        --transcripts-dir transcripts \
+        --out data/counts.csv \
+        --ensembl-cache data/ensemble_df.pkl \
+        --srr-map data/srr_to_gsm.tsv
+"""
+import argparse
 import os
 import pandas as pd
 from biomart import BiomartServer
@@ -5,108 +15,175 @@ from loguru import logger
 import time
 import metadata
 
-# Function to fetch data for a chunk of gene symbols
-def fetch_chunk(chunk, dataset, sleep_time=5):
-    try:
-        logger.info("Going to sleep...")
-        time.sleep(sleep_time)
-        logger.info("Awake! Overwhelming the server...")
-        response = dataset.search({
-            'filters': {'hgnc_symbol': chunk},
-            'attributes': ['ensembl_gene_id', 'hgnc_symbol', 'gene_biotype', 'chromosome_name']
-        })
-        logger.success("Successful retrieval from the server!")
-        data = response.text.strip().split('\n')
-        lines = [line.split('\t') for line in data if line.strip()]  # Skip empty lines
-        return lines
-    except Exception as e:
-        logger.error(f"Error fetching chunk: {chunk} - {e}")
-        exit(1)
-    return []
+# HTSeq-count appends these special summary lines at the end of each output file.
+_HTSEQ_SPECIAL = frozenset({
+    '__no_feature', '__ambiguous', '__too_low_aQual',
+    '__not_aligned', '__alignment_not_unique',
+})
 
-def fetch_data_in_chunks(gene_symbols, chunk_size=500):
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description='Merge per-sample transcript counts into an annotated count matrix.'
+    )
+    p.add_argument('--transcripts-dir', default='transcripts',
+                   help='Directory containing per-sample count CSV files (default: transcripts)')
+    p.add_argument('--out', default='data/counts.csv',
+                   help='Output merged counts CSV (default: data/counts.csv)')
+    p.add_argument('--ensembl-cache', default='data/ensemble_df.pkl',
+                   help='Pickle cache path for BioMart Ensembl lookup (default: data/ensemble_df.pkl)')
+    p.add_argument('--srr-map', default='data/srr_to_gsm.tsv',
+                   help='TSV cache path for SRR→GSM mapping (default: data/srr_to_gsm.tsv)')
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# BioMart helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_chunk(chunk, dataset, sleep_time=5):
+    """Query BioMart for a list of HGNC symbols.  Returns a list of row-lists."""
+    logger.info(f"Sleeping {sleep_time}s before BioMart query ({len(chunk)} symbols)...")
+    time.sleep(sleep_time)
+    response = dataset.search({
+        'filters': {'hgnc_symbol': chunk},
+        'attributes': ['ensembl_gene_id', 'hgnc_symbol', 'gene_biotype', 'chromosome_name'],
+    })
+    logger.success("BioMart query successful.")
+    lines = response.text.strip().split('\n')
+    return [line.split('\t') for line in lines if line.strip()]
+
+
+def _fetch_data_in_chunks(gene_symbols, chunk_size=500):
+    """Fetch BioMart annotation for all gene_symbols, batching to avoid URL limits."""
     all_results = []
-    total_processing_units = len(gene_symbols)
-    first_chunks = [gene_symbols[i:i + chunk_size] for i in range(0, len(gene_symbols), chunk_size)]
+    total = len(gene_symbols)
+
+    # First pass: split into chunks of chunk_size
+    raw_chunks = [gene_symbols[i:i + chunk_size] for i in range(0, total, chunk_size)]
+
+    # Second pass: further sub-divide any chunk whose joined length exceeds ~4 000 chars
     chunks = []
-    for _, chunk in enumerate(first_chunks):
-        subdivision = len(' '.join(chunk))
-        if subdivision >= 4000:
-            subdivision = subdivision // 4000 + 1
-            k, m = divmod(len(chunk), subdivision)
-            for i in range(subdivision):
-                chunks.append(chunk[i * k + min(i, m):(i + 1) * k + min(i + 1, m)])
+    for chunk in raw_chunks:
+        joined_len = len(' '.join(chunk))
+        if joined_len >= 4000:
+            n = joined_len // 4000 + 1
+            k, m = divmod(len(chunk), n)
+            for i in range(n):
+                sub = chunk[i * k + min(i, m):(i + 1) * k + min(i + 1, m)]
+                if sub:
+                    chunks.append(sub)
         else:
             chunks.append(chunk)
-    
-    for _, chunk in enumerate(chunks):
-        logger.info("Establishing the connection to the server...")
-        server = BiomartServer("http://www.ensembl.org/biomart")
-        logger.success("Connected to the server!")
-        hsapiens = server.datasets['hsapiens_gene_ensembl']
-        logger.info("Selected the database from biomart.")
-        result = fetch_chunk(chunk, dataset=hsapiens)
-        if result:
+
+    processed = 0
+    for chunk in chunks:
+        try:
+            logger.info("Connecting to BioMart server...")
+            server = BiomartServer("http://www.ensembl.org/biomart")
+            hsapiens = server.datasets['hsapiens_gene_ensembl']
+            result = _fetch_chunk(chunk, hsapiens)
             all_results.extend(result)
-        logger.info(f"{len(chunk)}/{total_processing_units} genes are processed for Ensembl ID matching.")
-    
+        except Exception as exc:
+            logger.error(
+                f"BioMart fetch failed for chunk starting with '{chunk[0]}': {exc}. "
+                "Skipping chunk — those genes will be absent from the count matrix."
+            )
+        processed += len(chunk)
+        logger.info(f"BioMart: {processed}/{total} gene symbols processed.")
+
     return all_results
 
 
-def generate_ensemble_dataframe():
-    # Specify the directory
-    directory = 'rna_seq_analysis/transcripts'
+# ---------------------------------------------------------------------------
+# Core logic
+# ---------------------------------------------------------------------------
 
-    # Get the list of all filenames in the directory
-    filenames = os.listdir(directory)
+def build_ensemble_df(transcripts_dir, cache_path):
+    """Return a DataFrame (Ensembl_ID, GeneSymbol, Biotype, Chromosome) for all
+    gene symbols found in transcripts_dir.  Result is pickled to cache_path.
+    """
+    if os.path.exists(cache_path):
+        logger.info(f"Loading Ensembl annotation cache from {cache_path}.")
+        return pd.read_pickle(cache_path)
 
-    if len(filenames) == 0:
-        logger.critical(f"{directory} is empty. Please check if the transcript is correctly generated.")
-        exit(1)
-    
-    filename = filenames[0]  # Pick a CSV transcript data file
-    full_path = os.path.join(directory, filename)
-    logger.info(f"Generate the gene ID database from {full_path}...")
-    dataframe = pd.read_csv(full_path, sep='\s+', header=None, names=["Gene", "Expression"])
-    logger.success("Successfully generated the gene ID database.")
-    
-    logger.info("Querying the list of entries to drop from the database...")
-    entries_to_drop = ['__no_feature', '__ambiguous', '__too_low_aQual', '__not_aligned', '__alignment_not_unique']
+    csv_files = [f for f in os.listdir(transcripts_dir) if f.endswith('.csv')]
+    if not csv_files:
+        logger.critical(f"{transcripts_dir} contains no CSV files.")
+        raise FileNotFoundError(f"No CSV files in {transcripts_dir}")
 
-    logger.info("Dropping rows with specific entries...")
-    dataframe = dataframe[~dataframe['Gene'].isin(entries_to_drop)]
-    logger.success("Successfully normalized the database.")
+    # Read one representative file to obtain the gene-symbol list
+    sample_path = os.path.join(transcripts_dir, csv_files[0])
+    logger.info(f"Building gene list from {sample_path}.")
+    df = pd.read_csv(sample_path, sep='\t', header=None, names=['Gene', 'Expression'])
+    df = df[~df['Gene'].isin(_HTSEQ_SPECIAL)]
+    gene_symbols = df['Gene'].dropna().unique().tolist()
+    logger.info(f"Found {len(gene_symbols)} unique gene symbols; querying BioMart...")
 
-    logger.info("Querying the list of gene symbols to lookup...")
-    gene_symbols = dataframe['Gene'].to_list()[:1000]
+    results = _fetch_data_in_chunks(gene_symbols)
+    ensemble_df = pd.DataFrame(
+        results,
+        columns=['Ensembl_ID', 'GeneSymbol', 'Biotype', 'Chromosome'],
+    )
+    # Keep the first Ensembl ID when a symbol maps to multiple genes
+    ensemble_df = ensemble_df.drop_duplicates(subset='GeneSymbol', keep='first')
 
-    logger.info("Fetching data in chunks sequentially...")
-    results = fetch_data_in_chunks(gene_symbols)
-    logger.success("Successfully retrieved the data chunks from the BioMart database.")
-
-    logger.info("Creating the final dataframe...")
-    df = pd.DataFrame(results, columns=["Ensembl Gene ID", "Gene Symbol", "Biotype", "Chromosome"])
-
-    # save the dataframe as a pickle file
-    df.to_pickle("rna_seq_analysis/data/ensemble_df.pkl")
-    return 0
-
-def generate_count_dataframe():
-    # Specify the directory
-    directory = 'rna_seq_analysis/transcripts'
-    # Get the list of all filenames in the directory
-    filenames = os.listdir(directory)
-    ensemble_df = pd.read_pickle("rna_seq_analysis/data/ensemble_df.pkl")
-    for filename in filenames:
-        full_path = os.path.join(directory, filename)
-        geo_id = metadata.get_geo_accession_from_srr(filename[:filename.index(".csv")])
-        transcript_dataframe = pd.read_csv(full_path, sep='\s+', header=None, names=["Gene Symbol", geo_id])
-        ensemble_df = ensemble_df.merge(transcript_dataframe, how='inner', on="Gene Symbol")
-    # save complete count dataframe into csv
-    ensemble_df.to_csv("rna_seq_analysis/data/counts.csv")
-    return 0
+    os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+    ensemble_df.to_pickle(cache_path)
+    logger.success(f"Ensembl cache written to {cache_path} ({len(ensemble_df)} genes).")
+    return ensemble_df
 
 
-if __name__ == "__init__":
-    generate_ensemble_dataframe()
-    generate_count_dataframe()
+def build_count_matrix(transcripts_dir, ensemble_df, srr_to_gsm):
+    """Inner-join each sample's counts onto the ensemble annotation DataFrame.
+
+    Columns in the result: Ensembl_ID, GeneSymbol, Biotype, Chromosome, <GSM_ids…>
+    """
+    merged = ensemble_df.copy()
+
+    for filename in sorted(os.listdir(transcripts_dir)):
+        if not filename.endswith('.csv'):
+            continue
+        srr = filename[:-4]  # strip .csv
+        gsm = srr_to_gsm.get(srr)
+        if gsm is None:
+            logger.warning(f"No GSM mapping for {srr}; skipping sample.")
+            continue
+
+        full_path = os.path.join(transcripts_dir, filename)
+        sample_df = pd.read_csv(full_path, sep='\t', header=None,
+                                names=['GeneSymbol', gsm])
+        sample_df = sample_df[~sample_df['GeneSymbol'].isin(_HTSEQ_SPECIAL)]
+        merged = merged.merge(sample_df, how='inner', on='GeneSymbol')
+        logger.info(f"Merged {srr} ({gsm}): {len(merged)} genes remaining.")
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == '__main__':
+    args = _parse_args()
+
+    # 1. Resolve SRR → GSM for every sample in the transcripts directory
+    srr_list = sorted(
+        f[:-4] for f in os.listdir(args.transcripts_dir) if f.endswith('.csv')
+    )
+    logger.info(f"Found {len(srr_list)} samples in {args.transcripts_dir}.")
+    srr_to_gsm = metadata.build_srr_to_gsm_map(srr_list, args.srr_map)
+
+    # 2. Fetch (or load cached) BioMart annotation for all gene symbols
+    ensemble_df = build_ensemble_df(args.transcripts_dir, args.ensembl_cache)
+
+    # 3. Merge per-sample counts into one matrix
+    counts = build_count_matrix(args.transcripts_dir, ensemble_df, srr_to_gsm)
+    n_samples = counts.shape[1] - 4  # subtract the 4 annotation columns
+    logger.info(f"Final count matrix: {counts.shape[0]} genes × {n_samples} samples.")
+
+    # 4. Write output (no pandas index — the Ensembl_ID column serves as the key)
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(out_dir, exist_ok=True)
+    counts.to_csv(args.out, index=False)
+    logger.success(f"Count matrix written to {args.out}.")

@@ -47,14 +47,53 @@ This will create an isolated virtual environment containing all the required Pyt
 
 This subsection provides a concise manual for executing the computational pipeline on a high-performance computing (HPC) environment. Before proceeding, please verify that your computing system meets the design specifications outlined in the previous subsection.
 
-The pipeline requires only a BioProject ID as input. At its current stage, the pipeline exclusively supports RNA-Seq differential gene expression analysis for Homo sapiens data. The necessary datasets, including raw sequencing reads and reference annotations, are automatically retrieved from the NCBI FTP server by the pipeline script.
+The pipeline supports RNA-Seq differential gene expression analysis for *Homo sapiens* **single-end** sequencing data. All datasets (raw reads and reference annotations) are downloaded automatically.
 
-In the NCBI Sequence Read Archive (SRA) database, BioProject IDs provide unique identifiers for retrieving all raw sequencing datasets associated with a particular project. These identifiers are typically formatted as \texttt{PRJNA} followed by a series of digits. BioProject IDs can be located either via the Gene Expression Omnibus (GEO) database or by directly searching the NCBI database. As shown in Figure~\ref{fig:ncbi-navigator}, users can find the BioProject ID by selecting “BioProject” in the search criteria. Once the appropriate BioProject ID is retrieved, users must navigate to the root directory of the cloned pipeline repository and execute the following command on their computing cluster:
-```sh
-sbatch run_pipeline.sh PRJNA123456 24:00:00
+### Arguments
+
 ```
-In this command, PRJNA123456 represents the BioProject ID, and 24\:00\:00 specifies the maximum expected execution time in HH\:MM\:SS format. While the total processing time depends on the number of \texttt{FASTQ} files and their sizes, typical runtimes range between 24 and 48 hours. For the case study conducted in this work, the pipeline completed execution in approximately 12 hours.
+sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD]
+```
 
-It is important to note that if the specified time limit is insufficient, the job will be automatically terminated by the SLURM workload manager. In such cases, the pipeline must be re-executed with an increased time allocation. Users are advised to monitor the execution status of their job by running the `sq` command, which provides real-time updates on job progress within the computing cluster.
+| Argument | Description | Example |
+|---|---|---|
+| `PRJNA_ID` | NCBI BioProject accession | `PRJNA316873` |
+| `HH:MM:SS` | SLURM wall-clock time limit | `24:00:00` |
+| `GSE_ACCESSION` | GEO Series accession for sample metadata | `GSE80336` |
+| `CONDITION_FIELD` | Column in GEO phenoData used to derive group labels (default: `title`) | `title` |
 
-While the execution process itself does not require user intervention, the status and potential errors can be monitored by inspecting the `.out` and `.err` files generated in the \texttt{RNA\_Seq\_Final\_Project/logs/} directory. These log files provide detailed information about the ongoing pipeline execution, including standard outputs and any error messages encountered during runtime.
+### Example — reproducing the bipolar disorder case study
+
+```sh
+sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
+```
+
+The script generates `config.yaml` automatically from the arguments above, so no manual file editing is required. To inspect or adjust the configuration beforehand, copy the template:
+
+```sh
+cp config.yaml.example config.yaml
+# edit config.yaml as needed, then:
+sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
+```
+
+While the job runs, monitor its status with `sq`. Logs are written to `logs/rna_seq_analysis_<jobid>.out` and `.err`.
+
+### Output files
+
+Upon successful completion the following files are produced:
+
+| Path | Contents |
+|---|---|
+| `fastq_files/SRR.numbers` | List of SRR run accessions downloaded |
+| `transcripts/<SRR>.csv` | Per-sample raw read counts from htseq-count |
+| `data/counts.csv` | Merged annotated count matrix (Ensembl ID + gene info + all samples) |
+| `deg_results.csv` | DESeq2 results ordered by adjusted p-value |
+| `data/plots/PCAPlot.png` | Principal Component Analysis |
+| `data/plots/MAPlot.png` | MA plot (raw LFC) |
+| `data/plots/resMAPlot.png` | MA plot (LFC-shrunken) |
+| `data/plots/VolcanoPlot.png` | Volcano plot of DEGs |
+| `data/plots/DispersionPlot.png` | DESeq2 dispersion plot |
+| `data/plots/HeatmapPairwisePlot.png` | Sample-to-sample distance heatmap |
+| `data/plots/HeatmapDEGPlot.png` | Heatmap of top 2 000 DEGs |
+
+> **Note**: if the specified time limit is insufficient the SLURM job will be terminated automatically. Re-submit with a longer allocation. Snakemake's `--rerun-incomplete` flag (used by default) ensures it picks up where it left off.

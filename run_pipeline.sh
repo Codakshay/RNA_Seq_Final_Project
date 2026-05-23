@@ -1,50 +1,72 @@
 #!/usr/bin/env bash
-# Usage: ./run_pipeline.sh PRJNAxxxxxx 40:30:00
+# Run the RNA-Seq DGE pipeline on a SLURM cluster.
+#
+# Usage:
+#   sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD]
+#
+# Arguments:
+#   PRJNA_ID        NCBI BioProject accession (e.g. PRJNA316873)
+#   HH:MM:SS        SLURM time limit for the job
+#   GSE_ACCESSION   GEO Series accession for sample metadata (e.g. GSE80336)
+#   CONDITION_FIELD Column in GEO phenoData used to derive condition labels
+#                   (default: title)
+#
+# Example:
+#   sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
 
-PROJECT_ID=$1 # BioProject ID
-TIME_LIMIT=$2 # SLURM time limit
+PROJECT_ID="${1:?Error: PRJNA_ID is required (e.g. PRJNA316873)}"
+TIME_LIMIT="${2:?Error: time limit is required (e.g. 24:00:00)}"
+GSE_ACCESSION="${3:?Error: GSE_ACCESSION is required (e.g. GSE80336)}"
+CONDITION_FIELD="${4:-title}"
 
-# Create a temporary Slurm job script
-cat <<EOF > run_job.sbatch
+# Create logs/ on the host before sbatch so SLURM can write its own log files
+mkdir -p logs
+
+# Generate config.yaml from the supplied arguments
+cat > config.yaml <<YAML
+project: ${PROJECT_ID}
+gse_accession: ${GSE_ACCESSION}
+condition_field: ${CONDITION_FIELD}
+YAML
+
+# Create and submit the SLURM job script
+cat > run_job.sbatch <<EOF
 #!/usr/bin/env bash
 #SBATCH --job-name=rna_seq_analysis
-#SBATCH --output=logs/rna_seq_analysis.out
-#SBATCH --error=logs/rna_seq_analysis.err
+#SBATCH --output=logs/rna_seq_analysis_%j.out
+#SBATCH --error=logs/rna_seq_analysis_%j.err
 #SBATCH --time=${TIME_LIMIT}
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=100G
 
-echo "Import modules and configure virtual environment"
+set -euo pipefail
+
+echo "[pipeline] Loading modules..."
 module load sra-toolkit/3.0.9
 module load hisat2/2.2.1
 module load python/3.10
+module load r/4.2
 
-echo "Creating and activating virtual environment"
+echo "[pipeline] Setting up Python virtual environment..."
 ENVDIR=\$(mktemp -d)
-virtualenv --no-download \$ENVDIR
-source \$ENVDIR/bin/activate
+virtualenv --no-download "\$ENVDIR"
+source "\$ENVDIR/bin/activate"
 
-# Upgrade pip and install dependencies
 pip install --no-index --upgrade pip
-pip install --no-index numpy
-pip install msgpack
-pip install packaging
-pip install blosc2
-pip install tables
-pip install HTSeq
-pip install biomart
-pip install --no-index loguru
-pip install --no-index pandas
-pip install --no-index biopython
+pip install -r requirements.txt
 
-echo "project: ${PROJECT_ID}" > config.yaml
+echo "[pipeline] Starting Snakemake workflow..."
+snakemake \
+    --snakefile pipeline.smk \
+    --cores 32 \
+    --rerun-incomplete \
+    --printshellcmds
 
-snakemake make_directories --cores 32
-snakemake download_fastq --cores 32
-
-snakemake --cores 32
-
+echo "[pipeline] Workflow complete. Cleaning up virtual environment..."
+deactivate
+rm -rf "\$ENVDIR"
 EOF
 
-# Submit the job to Slurm
 sbatch run_job.sbatch
+echo "Job submitted. Monitor with: sq"
+echo "Logs: logs/rna_seq_analysis_<jobid>.out / .err"

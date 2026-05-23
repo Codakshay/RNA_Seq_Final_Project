@@ -1,138 +1,206 @@
 # Load libraries ---------------------------------------------------------
-library(org.Hs.eg.db)
-library(tidyverse)
-library(GEOquery)
-library(airway)
-library(DESeq2)
-library(EnhancedVolcano)
-library(RColorBrewer)
-library(ggplotify)
-library(pheatmap)
-library(ggrepel)
+suppressPackageStartupMessages({
+  library(optparse)
+  library(org.Hs.eg.db)
+  library(tidyverse)
+  library(GEOquery)
+  library(DESeq2)
+  library(EnhancedVolcano)
+  library(RColorBrewer)
+  library(pheatmap)
+  library(ggrepel)
+})
 
-# Step I: Preparing count data --------------------------------------------
+# Parse CLI arguments ----------------------------------------------------
+option_list <- list(
+  make_option(c("--counts"), type = "character", metavar = "FILE",
+              help = "Path to the merged counts CSV produced by merge_transcripts.py [required]"),
+  make_option(c("--gse"), type = "character", metavar = "ACCESSION",
+              help = "GEO Series accession (e.g. GSE80336) used to fetch sample metadata [required]"),
+  make_option(c("--condition-field"), type = "character", default = "title",
+              metavar = "COLUMN",
+              help = paste("Column in GEO phenoData whose values identify sample groups.",
+                           "Trailing '-<number>' suffixes are stripped automatically,",
+                           "so 'control-2' becomes 'control'.",
+                           "[default: title]")),
+  make_option(c("--out"), type = "character", default = "deg_results.csv",
+              metavar = "FILE",
+              help = "Output CSV for ordered DEG results [default: deg_results.csv]"),
+  make_option(c("--plots-dir"), type = "character", default = "data/plots",
+              metavar = "DIR",
+              help = "Directory for output PNG plots [default: data/plots]")
+)
 
-# Load RNA-Seq data
-counts_data <- read.csv("data/counts.csv", stringsAsFactors = FALSE)
-rownames(counts_data) <- counts_data$Ensembl_ID  # Set Ensemble ID as rownames
-counts_data <- counts_data[, -c(1:4)]  # Drop metadata columns
+opt <- parse_args(
+  OptionParser(option_list = option_list),
+  convert_hyphens_to_underscores = TRUE
+)
 
-# Load metadata from GEO
-gse <- getGEO("GSE80336")
-metadata <- gse[["GSE80336_series_matrix.txt.gz"]]@phenoData
-coldata <- metadata@data  # Extract metadata
+if (is.null(opt$counts) || is.null(opt$gse)) {
+  stop("--counts and --gse are required. Run with --help for usage.", call. = FALSE)
+}
 
-# Preprocess metadata
-colnames(counts_data) <- coldata$geo_accession
-coldata$title <- gsub("control-.*", "control", coldata$title)
-coldata$title <- gsub("bipolar-.*", "bipolar", coldata$title)
-colnames(coldata)[1] <- "condition"
-coldata <- coldata[, -2]
-keeps <- c("condition", "age (years):ch1", "Sex:ch1", 
-           "postmortem interval (hours):ch1", "rin:ch1")
-coldata <- coldata[keeps]
+dir.create(opt$plots_dir, recursive = TRUE, showWarnings = FALSE)
+cat("Writing plots to:", opt$plots_dir, "\n")
 
-# Sanity check for column names
-stopifnot(all(colnames(counts_data) %in% rownames(coldata)))
+# Step I: Preparing count data -------------------------------------------
+counts_data <- read.csv(opt$counts, stringsAsFactors = FALSE, check.names = FALSE)
+rownames(counts_data) <- counts_data$Ensembl_ID
+
+# Drop the 4 annotation columns by name (safer than positional slicing)
+meta_cols   <- c("Ensembl_ID", "GeneSymbol", "Biotype", "Chromosome")
+counts_data <- counts_data[, !(names(counts_data) %in% meta_cols), drop = FALSE]
+
+# Load sample metadata from GEO
+gse     <- getGEO(opt$gse)
+coldata <- pData(gse[[1]])
+
+# Align counts columns to coldata rows using GSM IDs as the shared key
+common_gsm <- intersect(colnames(counts_data), rownames(coldata))
+if (length(common_gsm) == 0) {
+  stop(paste(
+    "No GSM IDs are shared between the counts matrix and GEO metadata for", opt$gse,
+    "\nEnsure merge_transcripts.py produced GSM accession IDs as column names."
+  ), call. = FALSE)
+}
+counts_data <- counts_data[, common_gsm, drop = FALSE]
+coldata     <- coldata[common_gsm, , drop = FALSE]
+
+# Derive condition labels: strip trailing '-<digits>' (e.g. "control-2" → "control")
+condition_raw    <- coldata[[opt$condition_field]]
+coldata$condition <- factor(gsub("-\\d+$", "", condition_raw))
+cat("Condition levels:", paste(levels(coldata$condition), collapse = ", "), "\n")
+
 stopifnot(all(colnames(counts_data) == rownames(coldata)))
 
-# Step II: Constructing DESeqDataSet --------------------------------------
-
+# Step II: Constructing DESeqDataSet -------------------------------------
 dds <- DESeqDataSetFromMatrix(
   countData = counts_data,
-  colData = coldata,
-  design = ~ condition
+  colData   = coldata,
+  design    = ~ condition
 )
 
-# Pre-filtering low-count genes
+# Pre-filtering: remove genes with zero total counts
 dds <- dds[rowSums(counts(dds)) >= 1, ]
 
-# Set reference level
-dds$condition <- relevel(dds$condition, ref = "control")
+# Reference level: first alphabetically (typically "control")
+dds$condition <- relevel(dds$condition, ref = levels(dds$condition)[1])
+cat("Reference condition:", levels(dds$condition)[1], "\n")
 
-# Step III: Running DESeq procedure ---------------------------------------
-
+# Step III: Running DESeq2 -----------------------------------------------
 dds <- DESeq(dds)
 
-# Save normalized read counts
 normalized_counts <- counts(dds, normalized = TRUE)
 
-# Extract and summarize results
-res <- results(dds, contrast = c("condition", "control", "bipolar"), alpha = 0.05)
+# Default contrast: treatment vs reference (derived from factor levels)
+res <- results(dds, alpha = 0.05)
 summary(res)
+cat("Significant genes (padj < 0.05):", sum(res$padj < 0.05, na.rm = TRUE), "\n")
 
-# Significant genes with adjusted p-value < 0.05
-cat("Significant genes:", sum(res$padj < 0.05, na.rm = TRUE), "\n")
-
-# Order results by smallest adjusted p-value
 resOrdered <- res[order(res$padj), ]
 
-# Step IV: Visualization --------------------------------------------------
+# LFC-shrunken results for visualization (second coefficient = treatment vs ref)
+coef_name <- resultsNames(dds)[2]
+cat("Using coefficient for LFC shrinkage:", coef_name, "\n")
+resLFC <- lfcShrink(dds, coef = coef_name, type = "apeglm")
 
-# MA Plot
-plotMA(res, ylim = c(-10, 10), cex = 0.7)
-abline(h = c(-1, 1), col = "red", lwd = 3)
+# Step IV: Visualization -------------------------------------------------
 
-# Shrink log fold changes for visualization
-resLFC <- lfcShrink(dds, coef = "condition_bipolar_vs_control", type = "apeglm")
-plotMA(resLFC, ylim = c(-10, 10), cex = 0.7)
+# MA Plot (raw)
+png(file.path(opt$plots_dir, "MAPlot.png"), width = 800, height = 600, res = 120)
+plotMA(res, ylim = c(-10, 10), cex = 0.7, main = "MA Plot")
 abline(h = c(-1, 1), col = "red", lwd = 3)
+dev.off()
+
+# MA Plot (LFC-shrunken)
+png(file.path(opt$plots_dir, "resMAPlot.png"), width = 800, height = 600, res = 120)
+plotMA(resLFC, ylim = c(-10, 10), cex = 0.7, main = "MA Plot (LFC shrinkage)")
+abline(h = c(-1, 1), col = "red", lwd = 3)
+dev.off()
 
 # Dispersion plot
+png(file.path(opt$plots_dir, "DispersionPlot.png"), width = 800, height = 600, res = 120)
 plotDispEsts(dds, main = "Dispersion Plot")
+dev.off()
 
-# Principal Component Analysis (PCA)
-rld <- vst(dds, blind = FALSE)
+# PCA plot
+rld  <- vst(dds, blind = FALSE)
 PCAA <- plotPCA(rld, intgroup = "condition")
-PCAA + geom_text(aes(label = name), size = 2.5) + ggtitle("PCA Plot")
+PCAA <- PCAA +
+  geom_text_repel(aes(label = name), size = 2.5) +
+  ggtitle("PCA Plot") +
+  theme_bw()
+ggsave(file.path(opt$plots_dir, "PCAPlot.png"), plot = PCAA,
+       width = 10, height = 7, dpi = 120)
 
 # Volcano plot
-res.df <- as.data.frame(res)
-res.df$symbol <- mapIds(
+res_df <- as.data.frame(res)
+res_df$symbol <- mapIds(
   org.Hs.eg.db,
-  keys = rownames(res.df),
-  keytype = "ENSEMBL",
-  column = "SYMBOL"
+  keys      = rownames(res_df),
+  keytype   = "ENSEMBL",
+  column    = "SYMBOL",
+  multiVals = "first"
 )
-EnhancedVolcano(res.df,
-                x = "log2FoldChange",
-                y = "padj",
-                lab = res.df$symbol,
-                pCutoff = 0.1,
-                FCcutoff = 1,
-                ylim = c(0,2.5),
-                title = "Volcano plot of Differentially Expressed Genes",
-                subtitle = bquote(italic('in human dorsal striatum'))
-                )
-
-# display up-regulated genes
-up_regulated <- na.omit(res.df[res.df$padj < 0.1 & res.df$log2FoldChange > 1.0,])
-up_regulated
-
-# display down-regulated genes
-down_regulated <- na.omit(res.df[res.df$padj < 0.1 & res.df$log2FoldChange < -1.0,])
-down_regulated
-
+volcano <- EnhancedVolcano(
+  res_df,
+  x        = "log2FoldChange",
+  y        = "padj",
+  lab      = res_df$symbol,
+  pCutoff  = 0.1,
+  FCcutoff = 1,
+  ylim     = c(0, 2.5),
+  title    = "Volcano plot of Differentially Expressed Genes",
+  subtitle = bquote(italic("in human dorsal striatum"))
+)
+ggsave(file.path(opt$plots_dir, "VolcanoPlot.png"), plot = volcano,
+       width = 12, height = 8, dpi = 120)
 
 # Heatmap of sample-to-sample distances
-sampleDists <- dist(t(assay(rld)))
-sampleDistMatrix <- as.matrix(sampleDists)
-colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
-pheatmap(sampleDistMatrix,
-         clustering_distance_rows = sampleDists,
-         clustering_distance_cols = sampleDists,
-         color = colors,
-         main = 'Heatmap of sample-to-sample distances')
+sample_dists      <- dist(t(assay(rld)))
+sample_dist_mat   <- as.matrix(sample_dists)
+heat_colors       <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+png(file.path(opt$plots_dir, "HeatmapPairwisePlot.png"),
+    width = 1200, height = 1000, res = 150)
+pheatmap(sample_dist_mat,
+         clustering_distance_rows = sample_dists,
+         clustering_distance_cols = sample_dists,
+         color = heat_colors,
+         main  = "Heatmap of sample-to-sample distances")
+dev.off()
 
-# Heatmap of significant DEGs
-top_genes <- rownames(resOrdered)[1:2000]
-logcolors <- colorRampPalette(rev(brewer.pal(9, "RdBu")))(255)
+# Heatmap of top DEGs (up to 2 000 rows)
+n_top     <- min(2000, nrow(resOrdered))
+top_genes <- na.omit(rownames(resOrdered)[seq_len(n_top)])
+log_colors <- colorRampPalette(rev(brewer.pal(9, "RdBu")))(255)
+anno_col   <- data.frame(condition = coldata$condition, row.names = rownames(coldata))
+png(file.path(opt$plots_dir, "HeatmapDEGPlot.png"),
+    width = 1200, height = 1000, res = 150)
 pheatmap(assay(rld)[top_genes, ],
-         cluster_rows = TRUE,
-         show_rownames = FALSE,
-         show_colnames = TRUE,
-         cluster_cols = TRUE,
-         fontsize_row = 8,
-         annotation_col = coldata["condition"],
-         color = logcolors,
-         main = 'Heatmap of significant DEGs')
+         cluster_rows   = TRUE,
+         show_rownames  = FALSE,
+         show_colnames  = TRUE,
+         cluster_cols   = TRUE,
+         fontsize_row   = 8,
+         annotation_col = anno_col,
+         color          = log_colors,
+         main           = "Heatmap of significant DEGs")
+dev.off()
+
+cat("All plots saved to:", opt$plots_dir, "\n")
+
+# Step V: Write DEG results CSV ------------------------------------------
+resOrdered_df            <- as.data.frame(resOrdered)
+resOrdered_df$Ensembl_ID <- rownames(resOrdered_df)
+resOrdered_df$symbol     <- mapIds(
+  org.Hs.eg.db,
+  keys      = rownames(resOrdered_df),
+  keytype   = "ENSEMBL",
+  column    = "SYMBOL",
+  multiVals = "first"
+)
+# Put identifiers first, then statistics
+stat_cols     <- setdiff(names(resOrdered_df), c("Ensembl_ID", "symbol"))
+resOrdered_df <- resOrdered_df[, c("Ensembl_ID", "symbol", stat_cols)]
+write.csv(resOrdered_df, opt$out, row.names = FALSE)
+cat("DEG results written to:", opt$out, "\n")

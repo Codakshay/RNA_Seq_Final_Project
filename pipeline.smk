@@ -1,5 +1,29 @@
 configfile: "config.yaml"
-PROJECT = config["project"]
+PROJECT         = config["project"]
+GSE_ACCESSION   = config["gse_accession"]
+CONDITION_FIELD = config["condition_field"]
+
+# Plot filenames that run_deg_analysis.R will produce
+PLOT_NAMES = [
+    "PCAPlot", "MAPlot", "resMAPlot",
+    "VolcanoPlot", "DispersionPlot",
+    "HeatmapPairwisePlot", "HeatmapDEGPlot",
+]
+
+########################################
+# Helper: read SAMPLES after checkpoint
+########################################
+def get_samples(wildcards):
+    """Input function that reads SRR.numbers only after download_fastq completes."""
+    checkpoints.download_fastq.get(**wildcards)
+    srr_file = "fastq_files/SRR.numbers"
+    with open(srr_file) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def all_transcript_csvs(wildcards):
+    return expand("transcripts/{sample}.csv", sample=get_samples(wildcards))
+
 
 ########################################
 # Setup Directories
@@ -12,134 +36,165 @@ rule make_directories:
         directory("fastq_files"),
         directory("ref_genome"),
         directory("alignment"),
-        directory("rna_seq_analysis/data")
     shell:
-        """
-        mkdir -p data logs transcripts fastq_files ref_genome alignment rna_seq_analysis/data
-        """
+        # data/plots is created here so deg_analysis can write PNGs into it
+        "mkdir -p data/plots logs transcripts fastq_files ref_genome alignment"
 
-rule download_fastq:
+
+########################################
+# Download FASTQ files (checkpoint)
+########################################
+checkpoint download_fastq:
     input:
-        PROJECT
+        rules.make_directories.output,
     output:
-        "fastq_files/SRR.numbers"
+        srr_numbers = "fastq_files/SRR.numbers",
     params:
-        sra_toolkit_module="sra-toolkit/3.0.9"
+        project = PROJECT,
     shell:
         """
-        module load {params.sra_toolkit_module}
-        
-        sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"
-        export PATH=${{HOME}}/edirect:${{PATH}}
-        
-        esearch -db sra -query {input} | efetch -format runinfo | cut -d "," -f 1 | tail -n +2 > {output}
-        
-        xargs < {output} -n 1 fasterq-dump -O fastq_files
+        # Install EDirect if not already on PATH
+        if ! command -v esearch &>/dev/null; then
+            sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"
+            export PATH="${{HOME}}/edirect:${{PATH}}"
+        fi
+
+        # Fetch the list of SRR run accessions for this BioProject
+        esearch -db sra -query {params.project} \
+            | efetch -format runinfo \
+            | cut -d ',' -f 1 \
+            | tail -n +2 \
+            > {output.srr_numbers}
+
+        # Download all runs as single-end FASTQ files
+        xargs -a {output.srr_numbers} -n 1 fasterq-dump -O fastq_files
+
+        # Reject paired-end data: fasterq-dump produces _1/_2 suffixes for PE runs
+        if ls fastq_files/*_2.fastq 2>/dev/null | grep -q .; then
+            echo "ERROR: paired-end FASTQ files detected (*_2.fastq)." >&2
+            echo "This pipeline only supports single-end RNA-Seq data." >&2
+            exit 1
+        fi
         """
 
 
 ########################################
-# Download and Prepare Reference Genome and Annotation
+# Download and Prepare Reference Genome
 ########################################
 rule download_ref_fna:
     input:
-        rules.make_directories.output
+        rules.make_directories.output,
     output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
+        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz",
     shell:
         """
-        curl -o {output} https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+        curl -o {output} \
+            https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
         """
 
 rule unzip_ref_fna:
     input:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
+        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz",
     output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna"
+        "data/GCF_000001405.40_GRCh38.p14_genomic.fna",
     shell:
         "gunzip -c {input} > {output}"
 
 rule download_gtf:
     input:
-        rules.make_directories.output
+        rules.make_directories.output,
     output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz"
+        "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz",
     shell:
         """
-        curl -o {output} https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
+        curl -o {output} \
+            https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
         """
-
-SAMPLES = [line.strip() for line in open("fastq_files/SRR.numbers") if line.strip()]
-
-rule all:
-    input:
-        expand("transcripts/{sample}.csv", sample=SAMPLES),
-        "deg_results.csv"
 
 rule build_hisat2_index:
     input:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna"
+        "data/GCF_000001405.40_GRCh38.p14_genomic.fna",
     output:
-        "ref_genome/ref_gen.1.ht2",
-        "ref_genome/ref_gen.2.ht2",
-        "ref_genome/ref_gen.3.ht2",
-        "ref_genome/ref_gen.4.ht2",
-        "ref_genome/ref_gen.5.ht2",
-        "ref_genome/ref_gen.6.ht2",
-        "ref_genome/ref_gen.7.ht2",
-        "ref_genome/ref_gen.8.ht2"
+        multiext("ref_genome/ref_gen",
+                 ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
+                 ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
     threads: 32
     shell:
-        """
-        hisat2-build -p {threads} {input} ref_genome/ref_gen
-        """
+        "hisat2-build -p {threads} {input} ref_genome/ref_gen"
+
 
 ########################################
-# Alignment and Counting
+# Alignment and Counting (per sample)
 ########################################
 rule align_reads:
     input:
-        index_prefix = "ref_genome/ref_gen",
-        fastq = "fastq_files/{sample}.fastq"
+        index = multiext("ref_genome/ref_gen",
+                         ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
+                         ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
+        fastq = "fastq_files/{sample}.fastq",
     output:
-        "alignment/{sample}.sam"
+        "alignment/{sample}.sam",
     threads: 32
     shell:
-        """
-        hisat2 -p {threads} -x {input.index_prefix} -U {input.fastq} -S {output}
-        """
+        "hisat2 -p {threads} -x ref_genome/ref_gen -U {input.fastq} -S {output}"
 
 rule count_reads:
     input:
         sam = "alignment/{sample}.sam",
-        gtf = "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz"
+        gtf = "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz",
     output:
-        "transcripts/{sample}.csv"
+        "transcripts/{sample}.csv",
     threads: 32
     shell:
         """
-        htseq-count {input.sam} {input.gtf} -f sam -r pos -i gene_id -t exon -n {threads} > {output}
+        htseq-count -f sam -r pos -i gene_id -t exon -n {threads} \
+            {input.sam} {input.gtf} > {output}
         """
 
+
 ########################################
-# Post-processing and DEG Analysis
+# Post-processing: merge + DEG analysis
 ########################################
 rule merge_results:
     input:
-        expand("transcripts/{sample}.csv", sample=SAMPLES)
+        all_transcript_csvs,
     output:
-        "rna_seq_analysis/data/counts.csv"
+        "data/counts.csv",
     shell:
         """
-        python3 merge_script.py > {output}
+        python3 merge_transcripts.py \
+            --transcripts-dir transcripts \
+            --out {output} \
+            --ensembl-cache data/ensemble_df.pkl \
+            --srr-map data/srr_to_gsm.tsv
         """
 
 rule deg_analysis:
     input:
-        "rna_seq_analysis/data/counts.csv"
+        counts = "data/counts.csv",
     output:
-        "deg_results.csv"
+        results = "deg_results.csv",
+        plots   = expand("data/plots/{name}.png", name=PLOT_NAMES),
+    params:
+        gse             = GSE_ACCESSION,
+        condition_field = CONDITION_FIELD,
+        plots_dir       = "data/plots",
     shell:
         """
-        Rscript run_deg_analysis.R
+        Rscript run_deg_analysis.R \
+            --counts {input.counts} \
+            --gse {params.gse} \
+            --condition-field "{params.condition_field}" \
+            --out {output.results} \
+            --plots-dir {params.plots_dir}
         """
+
+
+########################################
+# Default target
+########################################
+rule all:
+    input:
+        all_transcript_csvs,
+        "deg_results.csv",
+        expand("data/plots/{name}.png", name=PLOT_NAMES),

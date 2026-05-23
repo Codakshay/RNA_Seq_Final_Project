@@ -4,4 +4,6 @@ fastq_files/
 logs/
 ref_genome/
 transcripts/
+# Windows Alternate Data Stream files created by WSL/Explorer
+*.Identifier
 

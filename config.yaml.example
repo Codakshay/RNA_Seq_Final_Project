@@ -1,0 +1,19 @@
+# RNA-Seq DGE Pipeline — configuration template
+# Copy this file to config.yaml and fill in the values below before running.
+# The run_pipeline.sh script generates config.yaml automatically when you supply
+# the arguments on the command line, so manual editing is only needed for
+# advanced use cases.
+
+# NCBI BioProject ID whose SRA runs will be downloaded and processed.
+project: PRJNA316873
+
+# GEO Series accession used to fetch sample metadata (phenoData) via GEOquery.
+# Must correspond to the same study as 'project'.
+gse_accession: GSE80336
+
+# Column in the GEO phenoData table used to derive the condition factor for DESeq2.
+# For GSE80336 the relevant column is 'title', which contains strings like
+# 'control-2' and 'bipolar-4' that the R script simplifies to 'control'/'bipolar'.
+# For other studies, supply the exact column name that holds group labels,
+# e.g. 'characteristics_ch1.1' or 'disease state:ch1'.
+condition_field: title
