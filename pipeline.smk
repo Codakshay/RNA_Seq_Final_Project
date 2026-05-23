@@ -14,6 +14,10 @@ assert ALIGNER in ("hisat2", "parabricks_star"), \
     f"config[aligner] must be 'hisat2' or 'parabricks_star', got {ALIGNER!r}"
 DESEQ_WORKERS     = int(config.get("deseq_workers", 1))
 
+# Test-mode knobs (default 0 = no effect — production runs ignore them)
+SUBSAMPLE_READS   = int(config.get("subsample_reads", 0))  # fasterq-dump -X N
+MAX_SAMPLES       = int(config.get("max_samples", 0))      # head -n N of SRR list
+
 # Plot filenames that run_deg_analysis.R will produce
 PLOT_NAMES = [
     "PCAPlot", "MAPlot", "resMAPlot",
@@ -105,8 +109,10 @@ checkpoint download_fastq:
         srr_numbers = "fastq_files/SRR.numbers",
         layouts     = "fastq_files/layouts.tsv",
     params:
-        project    = PROJECT,
-        parallel   = DOWNLOAD_PARALLEL,
+        project         = PROJECT,
+        parallel        = DOWNLOAD_PARALLEL,
+        max_samples     = MAX_SAMPLES,
+        subsample_reads = SUBSAMPLE_READS,
     threads: 32
     shell:
         r"""
@@ -121,14 +127,28 @@ checkpoint download_fastq:
             | efetch -format runinfo \
             | cut -d ',' -f 1 \
             | tail -n +2 \
-            > {output.srr_numbers}
+            > {output.srr_numbers}.full
+
+        # Optional cap (test mode): keep only the first N SRRs
+        if [ "{params.max_samples}" -gt 0 ]; then
+            head -n {params.max_samples} {output.srr_numbers}.full > {output.srr_numbers}
+        else
+            mv {output.srr_numbers}.full {output.srr_numbers}
+        fi
+        rm -f {output.srr_numbers}.full
+
+        # Optional per-file read cap (test mode): pass -X N to fasterq-dump
+        EXTRA_FQD=""
+        if [ "{params.subsample_reads}" -gt 0 ]; then
+            EXTRA_FQD="-X {params.subsample_reads}"
+        fi
 
         # Parallel download. With {params.parallel} concurrent processes each
         # using 8 worker threads, we keep all 32 cores busy AND cut wall time
         # to roughly 1/{params.parallel} of the serial baseline (network/NCBI-
         # throttling permitting).
         xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
-            fasterq-dump -e 8 --split-files -O fastq_files
+            fasterq-dump -e 8 --split-files $EXTRA_FQD -O fastq_files
 
         # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced files.
         : > {output.layouts}

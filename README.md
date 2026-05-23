@@ -47,12 +47,12 @@ This will create an isolated virtual environment containing all the required Pyt
 
 This subsection provides a concise manual for executing the computational pipeline on a high-performance computing (HPC) environment. Before proceeding, please verify that your computing system meets the design specifications outlined in the previous subsection.
 
-The pipeline supports RNA-Seq differential gene expression analysis for *Homo sapiens* **single-end** sequencing data. All datasets (raw reads and reference annotations) are downloaded automatically.
+The pipeline supports RNA-Seq differential gene expression analysis for *Homo sapiens* RNA-Seq data. Single-end and paired-end layouts are both supported and auto-detected at download time. All datasets (raw reads and reference annotations) are downloaded automatically, or a pre-staged local reference can be supplied via config.
 
 ### Arguments
 
 ```
-sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD]
+sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD] [--gpu]
 ```
 
 | Argument | Description | Example |
@@ -61,11 +61,16 @@ sbatch run_pipeline.sh <PRJNA_ID> <HH:MM:SS> <GSE_ACCESSION> [CONDITION_FIELD]
 | `HH:MM:SS` | SLURM wall-clock time limit | `24:00:00` |
 | `GSE_ACCESSION` | GEO Series accession for sample metadata | `GSE80336` |
 | `CONDITION_FIELD` | Column in GEO phenoData used to derive group labels (default: `title`) | `title` |
+| `--gpu` | Optional. Submit to a GPU node and use NVIDIA Parabricks STAR for alignment. | — |
 
 ### Example — reproducing the bipolar disorder case study
 
 ```sh
+# CPU, ~9–12 hours wall time
 sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
+
+# GPU (Parabricks STAR), ~3–4 hours wall time
+sbatch run_pipeline.sh PRJNA316873 04:00:00 GSE80336 title --gpu
 ```
 
 The script generates `config.yaml` automatically from the arguments above, so no manual file editing is required. To inspect or adjust the configuration beforehand, copy the template:
@@ -78,6 +83,19 @@ sbatch run_pipeline.sh PRJNA316873 24:00:00 GSE80336 title
 
 While the job runs, monitor its status with `sq`. Logs are written to `logs/rna_seq_analysis_<jobid>.out` and `.err`.
 
+### Expected wall time (36-sample bipolar study, 32-core node)
+
+| Stage | CPU (HISAT2 + featureCounts) | GPU (Parabricks STAR + featureCounts) |
+|---|---:|---:|
+| SRR list + FASTQ download (parallel, 4 streams) | 1–2 h | 1–2 h |
+| Reference index build | ~1 h (HISAT2) | ~30 min (STAR) |
+| Alignment, 36 samples | 6–8 h | **30–60 min** |
+| Counting (featureCounts) | 20–30 min | 20–30 min |
+| Merge + BioMart + DESeq2 + plots | ~25 min | ~25 min |
+| **Total** | **~9–12 h** | **~3–4 h** |
+
+GPU mode is ~3× faster overall, driven entirely by Parabricks STAR replacing HISAT2 on the alignment step. DESeq2 itself has no GPU port; the `deseq_workers` config key offers a small multi-core CPU speedup but no order-of-magnitude win.
+
 ### Output files
 
 Upon successful completion the following files are produced:
@@ -85,7 +103,7 @@ Upon successful completion the following files are produced:
 | Path | Contents |
 |---|---|
 | `fastq_files/SRR.numbers` | List of SRR run accessions downloaded |
-| `transcripts/<SRR>.csv` | Per-sample raw read counts from htseq-count |
+| `transcripts/<SRR>.csv` | Per-sample raw read counts from featureCounts |
 | `data/counts.csv` | Merged annotated count matrix (Ensembl ID + gene info + all samples) |
 | `deg_results.csv` | DESeq2 results ordered by adjusted p-value |
 | `data/plots/PCAPlot.png` | Principal Component Analysis |
@@ -97,3 +115,39 @@ Upon successful completion the following files are produced:
 | `data/plots/HeatmapDEGPlot.png` | Heatmap of top 2 000 DEGs |
 
 > **Note**: if the specified time limit is insufficient the SLURM job will be terminated automatically. Re-submit with a longer allocation. Snakemake's `--rerun-incomplete` flag (used by default) ensures it picks up where it left off.
+
+## Smoke Tests
+
+Two `sbatch`-able scripts under `tests/` validate the full pipeline end-to-end at a fraction of the cost of a real run. Both run in an isolated workspace under `tests/output/` so they don't clobber a real run's outputs.
+
+| Script | Samples | Reads / sample | Wall time (CPU / GPU) | When to run |
+|---|---:|---:|---:|---|
+| `tests/test_minimal.sh` | 4 | 50 000 | ~15 min / ~10 min | Pre-commit "is anything broken" check |
+| `tests/test_subsampled.sh` | 36 | 100 000 | ~30 min / ~10 min | Full DAG validation at miniature scale |
+
+```sh
+# Fastest possible end-to-end check (CPU)
+sbatch tests/test_minimal.sh
+
+# Same, but on GPU
+sbatch tests/test_minimal.sh --gpu
+
+# 36-sample shape validation
+sbatch tests/test_subsampled.sh --gpu
+```
+
+Both scripts print `PASS` or `FAIL` at the end of their `.out` log based on the presence of `deg_results.csv` and all 7 PNG plots.
+
+## Configuration Reference
+
+Beyond the CLI args, `config.yaml.example` documents these optional keys:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `aligner` | `hisat2` | `hisat2` (CPU) or `parabricks_star` (GPU). Auto-set by `--gpu`. |
+| `download_parallel` | `4` | Concurrent `fasterq-dump` processes. |
+| `deseq_workers` | `1` | BiocParallel workers for DESeq2 (small CPU-only speedup). |
+| `local_reference_fa` | `""` | Skip GRCh38 download; use a pre-staged FASTA path. |
+| `local_reference_gtf` | `""` | Skip GTF download; use a pre-staged annotation path. |
+| `subsample_reads` | `0` | Pass `-X N` to fasterq-dump (testing). |
+| `max_samples` | `0` | Truncate the SRR list to first N (testing). |
