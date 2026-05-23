@@ -9,6 +9,9 @@ CONDITION_FIELD = config["condition_field"]
 LOCAL_FA          = config.get("local_reference_fa", "").strip()
 LOCAL_GTF         = config.get("local_reference_gtf", "").strip()
 DOWNLOAD_PARALLEL = int(config.get("download_parallel", 4))
+ALIGNER           = config.get("aligner", "hisat2").strip()
+assert ALIGNER in ("hisat2", "parabricks_star"), \
+    f"config[aligner] must be 'hisat2' or 'parabricks_star', got {ALIGNER!r}"
 
 # Plot filenames that run_deg_analysis.R will produce
 PLOT_NAMES = [
@@ -202,41 +205,102 @@ else:
                 https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
             """
 
-rule build_hisat2_index:
-    input:
-        "data/reference.fna",
-    output:
-        multiext("ref_genome/ref_gen",
-                 ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
-                 ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
-    threads: 32
-    shell:
-        "hisat2-build -p {threads} {input} ref_genome/ref_gen"
+########################################
+# Aligner index (only the one matching config[aligner] is materialized)
+########################################
+if ALIGNER == "hisat2":
+    rule build_hisat2_index:
+        input:
+            "data/reference.fna",
+        output:
+            multiext("ref_genome/ref_gen",
+                     ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
+                     ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
+        threads: 32
+        shell:
+            "hisat2-build -p {threads} {input} ref_genome/ref_gen"
+
+else:  # parabricks_star
+    rule build_star_index:
+        # STAR genomeGenerate is CPU-only (no Parabricks step), runs once, ~30 min on
+        # 32 cores. The index ends up in ref_genome/star_index/ and is reused for all
+        # alignment jobs.
+        input:
+            fa     = "data/reference.fna",
+            gtf_gz = "data/reference.gtf.gz",
+        output:
+            directory("ref_genome/star_index"),
+        threads: 32
+        shell:
+            r"""
+            mkdir -p {output}
+            # STAR's --sjdbGTFfile wants an uncompressed GTF
+            TMPGTF=$(mktemp --suffix=.gtf)
+            gunzip -c {input.gtf_gz} > "$TMPGTF"
+            STAR --runMode genomeGenerate --runThreadN {threads} \
+                 --genomeDir {output} \
+                 --genomeFastaFiles {input.fa} \
+                 --sjdbGTFfile "$TMPGTF" \
+                 --sjdbOverhang 99
+            rm -f "$TMPGTF"
+            """
 
 
 ########################################
-# Alignment and Counting (per sample)
+# Alignment (the rule actually instantiated depends on ALIGNER)
 ########################################
-rule align_reads:
-    input:
-        index = multiext("ref_genome/ref_gen",
-                         ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
-                         ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
-        fastq = fastq_inputs,   # 1 or 2 files, layout decided by layouts.tsv
-    output:
-        "alignment/{sample}.sam",
-    threads: 32
-    params:
-        reads = hisat2_read_args,  # "-U …" for single, "-1 … -2 …" for paired
-    shell:
-        "hisat2 -p {threads} -x ref_genome/ref_gen {params.reads} -S {output}"
+if ALIGNER == "hisat2":
+    rule align_reads:
+        # HISAT2 pipes SAM into samtools sort so downstream counting always sees
+        # sorted BAM, regardless of which aligner produced it.
+        input:
+            index = multiext("ref_genome/ref_gen",
+                             ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
+                             ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
+            fastq = fastq_inputs,
+        output:
+            "alignment/{sample}.bam",
+        threads: 32
+        params:
+            reads = hisat2_read_args,  # "-U …" for single, "-1 … -2 …" for paired
+        shell:
+            "hisat2 -p {threads} -x ref_genome/ref_gen {params.reads} "
+            "| samtools sort -@ {threads} -o {output} -"
 
+else:  # parabricks_star
+    rule align_parabricks:
+        # GPU alignment via NVIDIA Parabricks (rna_fq2bam uses STAR under the hood).
+        # Requires `module load parabricks` and a SLURM allocation with --gres=gpu:1
+        # (set up by run_pipeline.sh when invoked with --gpu).
+        input:
+            fastq = fastq_inputs,
+            idx   = "ref_genome/star_index",
+            fa    = "data/reference.fna",
+        output:
+            "alignment/{sample}.bam",
+        threads: 16
+        resources:
+            gpu    = 1,
+            mem_mb = 80000,
+        shell:
+            # pbrun rna_fq2bam takes 1 or 2 paths after --in-fq; {input.fastq}
+            # expands to a space-separated list, so both layouts Just Work.
+            "pbrun rna_fq2bam "
+            "--ref {input.fa} "
+            "--genome-lib-dir {input.idx} "
+            "--in-fq {input.fastq} "
+            "--out-bam {output}"
+
+
+########################################
+# Counting (input is the canonical sorted BAM from whichever aligner ran)
+########################################
 rule count_reads:
     # featureCounts is ~10-20x faster than htseq-count on the same input;
     # output is reduced to the (gene_id<TAB>count) two-column TSV that
     # merge_transcripts.py already knows how to parse.
     input:
-        sam = "alignment/{sample}.sam",
+        bam = "alignment/{sample}.bam",
         gtf = "data/reference.gtf.gz",
     output:
         counts  = "transcripts/{sample}.csv",
@@ -247,7 +311,7 @@ rule count_reads:
         """
         featureCounts -T {threads} -a {input.gtf} \
                       -t exon -g gene_id {params.paired_flag} \
-                      -o {output.counts}.raw {input.sam}
+                      -o {output.counts}.raw {input.bam}
         # Strip featureCounts header lines (1: comment, 2: column names)
         # and keep only Geneid (col 1) and the per-sample count (last col).
         awk 'NR>2 {{print $1"\\t"$NF}}' {output.counts}.raw > {output.counts}
