@@ -1,7 +1,14 @@
+import os
+
 configfile: "config.yaml"
 PROJECT         = config["project"]
 GSE_ACCESSION   = config["gse_accession"]
 CONDITION_FIELD = config["condition_field"]
+
+# Optional execution-mode keys (added in Stage 8 — safe defaults preserve old behaviour)
+LOCAL_FA          = config.get("local_reference_fa", "").strip()
+LOCAL_GTF         = config.get("local_reference_gtf", "").strip()
+DOWNLOAD_PARALLEL = int(config.get("download_parallel", 4))
 
 # Plot filenames that run_deg_analysis.R will produce
 PLOT_NAMES = [
@@ -11,7 +18,7 @@ PLOT_NAMES = [
 ]
 
 ########################################
-# Helper: read SAMPLES after checkpoint
+# Helpers: read SAMPLES + layouts after the download checkpoint
 ########################################
 def get_samples(wildcards):
     """Input function that reads SRR.numbers only after download_fastq completes."""
@@ -23,6 +30,49 @@ def get_samples(wildcards):
 
 def all_transcript_csvs(wildcards):
     return expand("transcripts/{sample}.csv", sample=get_samples(wildcards))
+
+
+def _read_layouts():
+    """Parse fastq_files/layouts.tsv (SRR<TAB>single|paired). Returns {} if missing."""
+    path = "fastq_files/layouts.tsv"
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            srr, layout = line.split("\t", 1)
+            out[srr] = layout
+    return out
+
+
+def is_paired(sample):
+    """True iff layouts.tsv marks this sample as paired-end."""
+    return _read_layouts().get(sample, "single") == "paired"
+
+
+def fastq_inputs(wildcards):
+    """Return the FASTQ file(s) for {sample}, gated on the download checkpoint."""
+    checkpoints.download_fastq.get()
+    if is_paired(wildcards.sample):
+        return [f"fastq_files/{wildcards.sample}_1.fastq",
+                f"fastq_files/{wildcards.sample}_2.fastq"]
+    return [f"fastq_files/{wildcards.sample}.fastq"]
+
+
+def hisat2_read_args(wildcards):
+    """Return the HISAT2 read-input fragment (-U single OR -1 r1 -2 r2)."""
+    if is_paired(wildcards.sample):
+        return (f"-1 fastq_files/{wildcards.sample}_1.fastq "
+                f"-2 fastq_files/{wildcards.sample}_2.fastq")
+    return f"-U fastq_files/{wildcards.sample}.fastq"
+
+
+def featurecounts_paired_flag(wildcards):
+    """featureCounts paired-end flag, empty for single-end."""
+    return "-p --countReadPairs" if is_paired(wildcards.sample) else ""
 
 
 ########################################
@@ -42,17 +92,20 @@ rule make_directories:
 
 
 ########################################
-# Download FASTQ files (checkpoint)
+# Download FASTQ files (checkpoint, parallel, paired-end aware)
 ########################################
 checkpoint download_fastq:
     input:
         rules.make_directories.output,
     output:
         srr_numbers = "fastq_files/SRR.numbers",
+        layouts     = "fastq_files/layouts.tsv",
     params:
-        project = PROJECT,
+        project    = PROJECT,
+        parallel   = DOWNLOAD_PARALLEL,
+    threads: 32
     shell:
-        """
+        r"""
         # Install EDirect if not already on PATH
         if ! command -v esearch &>/dev/null; then
             sh -c "$(curl -fsSL https://ftp.ncbi.nlm.nih.gov/entrez/entrezdirect/install-edirect.sh)"
@@ -66,54 +119,92 @@ checkpoint download_fastq:
             | tail -n +2 \
             > {output.srr_numbers}
 
-        # Download all runs as single-end FASTQ files
-        xargs -a {output.srr_numbers} -n 1 fasterq-dump -O fastq_files
+        # Parallel download. With {params.parallel} concurrent processes each
+        # using 8 worker threads, we keep all 32 cores busy AND cut wall time
+        # to roughly 1/{params.parallel} of the serial baseline (network/NCBI-
+        # throttling permitting).
+        xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
+            fasterq-dump -e 8 --split-files -O fastq_files
 
-        # Reject paired-end data: fasterq-dump produces _1/_2 suffixes for PE runs
-        if ls fastq_files/*_2.fastq 2>/dev/null | grep -q .; then
-            echo "ERROR: paired-end FASTQ files detected (*_2.fastq)." >&2
-            echo "This pipeline only supports single-end RNA-Seq data." >&2
-            exit 1
-        fi
+        # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced files.
+        : > {output.layouts}
+        while read SRR; do
+            if [ -f "fastq_files/${{SRR}}_2.fastq" ]; then
+                echo -e "${{SRR}}\tpaired" >> {output.layouts}
+            else
+                echo -e "${{SRR}}\tsingle" >> {output.layouts}
+            fi
+        done < {output.srr_numbers}
         """
 
 
 ########################################
-# Download and Prepare Reference Genome
+# Reference genome + annotation
+#
+# When config[local_reference_fa] / [local_reference_gtf] are set, the
+# corresponding download rule is replaced by a symlink-or-decompress rule.
+# Otherwise the original NCBI GRCh38 GCF files are fetched.
 ########################################
-rule download_ref_fna:
-    input:
-        rules.make_directories.output,
-    output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz",
-    shell:
-        """
-        curl -o {output} \
-            https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
-        """
+if LOCAL_FA:
+    rule provide_reference_fa:
+        input:
+            rules.make_directories.output,
+        output:
+            "data/reference.fna",
+        params:
+            src = LOCAL_FA,
+        shell:
+            r"""
+            if [[ "{params.src}" == *.gz ]]; then
+                gunzip -c "{params.src}" > {output}
+            else
+                ln -sf "$(readlink -f '{params.src}')" {output}
+            fi
+            """
+else:
+    rule download_reference_fa:
+        input:
+            rules.make_directories.output,
+        output:
+            "data/reference.fna",
+        shell:
+            """
+            curl -o {output}.gz \
+                https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+            gunzip -f {output}.gz
+            """
 
-rule unzip_ref_fna:
-    input:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna.gz",
-    output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna",
-    shell:
-        "gunzip -c {input} > {output}"
-
-rule download_gtf:
-    input:
-        rules.make_directories.output,
-    output:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz",
-    shell:
-        """
-        curl -o {output} \
-            https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
-        """
+if LOCAL_GTF:
+    rule provide_reference_gtf:
+        input:
+            rules.make_directories.output,
+        output:
+            "data/reference.gtf.gz",
+        params:
+            src = LOCAL_GTF,
+        shell:
+            r"""
+            if [[ "{params.src}" == *.gz ]]; then
+                ln -sf "$(readlink -f '{params.src}')" {output}
+            else
+                gzip -c "{params.src}" > {output}
+            fi
+            """
+else:
+    rule download_reference_gtf:
+        input:
+            rules.make_directories.output,
+        output:
+            "data/reference.gtf.gz",
+        shell:
+            """
+            curl -o {output} \
+                https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
+            """
 
 rule build_hisat2_index:
     input:
-        "data/GCF_000001405.40_GRCh38.p14_genomic.fna",
+        "data/reference.fna",
     output:
         multiext("ref_genome/ref_gen",
                  ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
@@ -131,12 +222,14 @@ rule align_reads:
         index = multiext("ref_genome/ref_gen",
                          ".1.ht2", ".2.ht2", ".3.ht2", ".4.ht2",
                          ".5.ht2", ".6.ht2", ".7.ht2", ".8.ht2"),
-        fastq = "fastq_files/{sample}.fastq",
+        fastq = fastq_inputs,   # 1 or 2 files, layout decided by layouts.tsv
     output:
         "alignment/{sample}.sam",
     threads: 32
+    params:
+        reads = hisat2_read_args,  # "-U …" for single, "-1 … -2 …" for paired
     shell:
-        "hisat2 -p {threads} -x ref_genome/ref_gen -U {input.fastq} -S {output}"
+        "hisat2 -p {threads} -x ref_genome/ref_gen {params.reads} -S {output}"
 
 rule count_reads:
     # featureCounts is ~10-20x faster than htseq-count on the same input;
@@ -144,14 +237,16 @@ rule count_reads:
     # merge_transcripts.py already knows how to parse.
     input:
         sam = "alignment/{sample}.sam",
-        gtf = "data/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz",
+        gtf = "data/reference.gtf.gz",
     output:
         counts  = "transcripts/{sample}.csv",
     threads: 8
+    params:
+        paired_flag = featurecounts_paired_flag,  # "-p --countReadPairs" iff paired
     shell:
         """
         featureCounts -T {threads} -a {input.gtf} \
-                      -t exon -g gene_id \
+                      -t exon -g gene_id {params.paired_flag} \
                       -o {output.counts}.raw {input.sam}
         # Strip featureCounts header lines (1: comment, 2: column names)
         # and keep only Geneid (col 1) and the per-sample count (last col).

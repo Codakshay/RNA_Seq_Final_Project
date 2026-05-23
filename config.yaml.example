@@ -17,3 +17,16 @@ gse_accession: GSE80336
 # For other studies, supply the exact column name that holds group labels,
 # e.g. 'characteristics_ch1.1' or 'disease state:ch1'.
 condition_field: title
+
+# --- Performance / execution mode -----------------------------------------
+# Number of concurrent fasterq-dump processes during the SRA download phase.
+# Each child uses 8 worker threads, so 4 × 8 = 32 cores. NCBI throttles per-IP
+# throughput so values above ~4 yield diminishing returns.
+download_parallel: 4
+
+# --- Optional: skip the NCBI reference download --------------------------
+# Absolute paths to a pre-staged FASTA/GTF (or their .gz equivalents). When
+# either key is non-empty the corresponding download rule is replaced by a
+# symlink-or-decompress rule. Leave empty (default) to fetch GRCh38 from NCBI.
+local_reference_fa:  ""
+local_reference_gtf: ""
