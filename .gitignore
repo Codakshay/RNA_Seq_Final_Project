@@ -7,3 +7,4 @@ transcripts/
 # Windows Alternate Data Stream files created by WSL/Explorer
 *.Identifier
 
+tests/output/

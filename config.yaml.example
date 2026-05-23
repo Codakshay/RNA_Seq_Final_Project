@@ -36,6 +36,13 @@ download_parallel: 4
 # so 1 (serial) is a fine default. Worth bumping for studies with >100 samples.
 deseq_workers: 1
 
+# --- Test-mode knobs (leave at 0 for production runs) --------------------
+# subsample_reads:  passed as fasterq-dump -X N, capping each FASTQ at N reads.
+# max_samples:      truncates the SRR list to the first N samples.
+# Both are used by tests/test_*.sh to run the full DAG at miniature scale.
+subsample_reads: 0
+max_samples:     0
+
 # --- Optional: skip the NCBI reference download --------------------------
 # Absolute paths to a pre-staged FASTA/GTF (or their .gz equivalents). When
 # either key is non-empty the corresponding download rule is replaced by a
