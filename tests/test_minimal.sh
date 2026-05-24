@@ -33,7 +33,12 @@ CONDITION_FIELD=title
 MAX_SAMPLES=4
 SUBSAMPLE_READS=50000
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+	REPO_ROOT="$SLURM_SUBMIT_DIR"
+else
+	REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
 WORKSPACE="$REPO_ROOT/tests/output/minimal"
 mkdir -p "$WORKSPACE/logs"
 
@@ -43,7 +48,7 @@ done
 
 if [ "$USE_GPU" -eq 1 ]; then
     ALIGNER=parabricks_star
-    GPU_SBATCH="#SBATCH --gres=gpu:v100:1"
+    GPU_SBATCH="#SBATCH --gres=gpu:ampere:1"
     EXTRA_MOD="module load parabricks cuda star/2.7.10b subread/2.0.6 samtools/1.17"
     WALLTIME="00:30:00"
 else
@@ -69,8 +74,8 @@ cat > "$WORKSPACE/run_test.sbatch" <<EOF
 #SBATCH --output=$WORKSPACE/logs/test_minimal_%j.out
 #SBATCH --error=$WORKSPACE/logs/test_minimal_%j.err
 #SBATCH --time=$WALLTIME
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 $GPU_SBATCH
 
 set -euo pipefail
