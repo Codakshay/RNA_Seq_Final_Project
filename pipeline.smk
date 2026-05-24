@@ -88,15 +88,9 @@ def featurecounts_paired_flag(wildcards):
 ########################################
 rule make_directories:
     output:
-        directory("data"),
-        directory("logs"),
-        directory("transcripts"),
-        directory("fastq_files"),
-        directory("ref_genome"),
-        directory("alignment"),
+        ".dirs_ready"
     shell:
-        # data/plots is created here so deg_analysis can write PNGs into it
-        "mkdir -p data/plots logs transcripts fastq_files ref_genome alignment"
+        "mkdir -p data/plots logs transcripts fastq_files ref_genome alignment && touch .dirs_ready"
 
 
 ########################################
@@ -137,18 +131,15 @@ checkpoint download_fastq:
         fi
         rm -f {output.srr_numbers}.full
 
-        # Optional per-file read cap (test mode): pass -X N to fasterq-dump
-        EXTRA_FQD=""
+        # fasterq-dump does not support read subsampling; fall back to fastq-dump
+        # (which accepts -X N) when a subsample cap is requested.
         if [ "{params.subsample_reads}" -gt 0 ]; then
-            EXTRA_FQD="-X {params.subsample_reads}"
+            xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
+                fastq-dump -X {params.subsample_reads} --split-files -O fastq_files
+        else
+            xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
+                fasterq-dump -e 8 --split-files -O fastq_files
         fi
-
-        # Parallel download. With {params.parallel} concurrent processes each
-        # using 8 worker threads, we keep all 32 cores busy AND cut wall time
-        # to roughly 1/{params.parallel} of the serial baseline (network/NCBI-
-        # throttling permitting).
-        xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
-            fasterq-dump -e 8 --split-files $EXTRA_FQD -O fastq_files
 
         # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced files.
         : > {output.layouts}

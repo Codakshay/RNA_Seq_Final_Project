@@ -33,11 +33,7 @@ CONDITION_FIELD=title
 MAX_SAMPLES=4
 SUBSAMPLE_READS=50000
 
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-	REPO_ROOT="$SLURM_SUBMIT_DIR"
-else
-	REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fi
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WORKSPACE="$REPO_ROOT/tests/output/minimal"
 mkdir -p "$WORKSPACE/logs"
@@ -81,21 +77,42 @@ cd "$WORKSPACE"
 
 echo "[test_minimal] aligner=$ALIGNER  walltime=$WALLTIME  samples=$MAX_SAMPLES"
 
-eval "$(mamba shell hook --shell bash)"
-mamba activate rna_seq
+set +eu
+if [ -f "\$HOME/.bashrc" ]; then
+    source "\$HOME/.bashrc"
+fi
+set -eu
 
-snakemake --snakefile pipeline.smk --cores "${SLURM_CPUS_PER_TASK}" --rerun-incomplete --printshellcmds
+source "\$(conda info --base)/etc/profile.d/conda.sh"
+conda activate parabricks_env
 
-# Pass/fail gate
+snakemake --snakefile pipeline.smk --cores 16 --rerun-incomplete --printshellcmds deg_results.csv
+
+# Temporarily lower strict error catching to evaluate the results block safely
+set +e
+
+echo "[test_minimal] Pipeline finished execution. Evaluating output footprints..."
 EXIT_OK=1
-[ -f deg_results.csv ] || { echo "FAIL: deg_results.csv missing"; EXIT_OK=0; }
+
+if [ ! -f deg_results.csv ]; then
+    echo "FAIL: deg_results.csv missing"
+    EXIT_OK=0
+fi
+
 for p in PCAPlot MAPlot resMAPlot VolcanoPlot DispersionPlot HeatmapPairwisePlot HeatmapDEGPlot; do
-    [ -f "data/plots/\$p.png" ] || { echo "FAIL: data/plots/\$p.png missing"; EXIT_OK=0; }
+    if [ ! -f "data/plots/\${p}.png" ]; then
+        echo "FAIL: data/plots/\${p}.png missing"
+        EXIT_OK=0
+    fi
 done
+
+# Restore strict error checks
+set -e
+
 if [ "\$EXIT_OK" -eq 1 ]; then
-    echo "[test_minimal] PASS"
+    echo "[test_minimal] ALL PLOTS AND DATA VERIFIED: PASS"
 else
-    echo "[test_minimal] FAIL"
+    echo "[test_minimal] PIPELINE EVALUATION OUTCOME: FAIL"
     exit 1
 fi
 
