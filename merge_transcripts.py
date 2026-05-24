@@ -103,8 +103,10 @@ def build_ensemble_df(transcripts_dir, cache_path):
         results,
         columns=['Ensembl_ID', 'GeneSymbol', 'Biotype', 'Chromosome'],
     )
-    # Keep the first Ensembl ID when a symbol maps to multiple genes
+    # Dedup on both axes: one Ensembl ID per symbol AND one symbol per Ensembl ID
+    # (aliases in BioMart can cause many-to-one mappings in either direction).
     ensemble_df = ensemble_df.drop_duplicates(subset='GeneSymbol', keep='first')
+    ensemble_df = ensemble_df.drop_duplicates(subset='Ensembl_ID', keep='first')
 
     os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
     ensemble_df.to_pickle(cache_path)

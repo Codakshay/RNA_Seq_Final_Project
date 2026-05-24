@@ -95,19 +95,20 @@ dds <- DESeqDataSetFromMatrix(
   design    = ~ condition
 )
 
-# Pre-filtering: remove genes with zero total counts
-dds <- dds[rowSums(counts(dds)) >= 1, ]
+# Pre-filtering: remove genes with very few total counts
+dds <- dds[rowSums(counts(dds)) >= 10, ]
 
-# Reference level: first alphabetically (typically "control")
-dds$condition <- relevel(dds$condition, ref = levels(dds$condition)[1])
+# Sanity check: DE analysis needs at least two condition levels with >=1 sample each
+if (nlevels(dds$condition) < 2) {
+  stop("Need >=2 condition levels for DE analysis; got: ",
+       paste(levels(dds$condition), collapse = ", "), call. = FALSE)
+}
 cat("Reference condition:", levels(dds$condition)[1], "\n")
 
 # Step III: Running DESeq2 -----------------------------------------------
 # parallel = TRUE forwards work to the BiocParallel backend registered above;
 # it's a no-op when workers == 1 (default).
 dds <- DESeq(dds, parallel = (opt$workers > 1))
-
-normalized_counts <- counts(dds, normalized = TRUE)
 
 # Default contrast: treatment vs reference (derived from factor levels)
 res <- results(dds, alpha = 0.05)
@@ -187,8 +188,10 @@ pheatmap(sample_dist_mat,
 dev.off()
 
 # Heatmap of top DEGs (up to 2 000 rows)
-n_top     <- min(2000, nrow(resOrdered))
-top_genes <- na.omit(rownames(resOrdered)[seq_len(n_top)])
+# Drop genes with NA padj (DESeq2 sets padj = NA for low-count / outlier rows)
+resHeatmap <- resOrdered[!is.na(resOrdered$padj), ]
+n_top      <- min(2000, nrow(resHeatmap))
+top_genes  <- rownames(resHeatmap)[seq_len(n_top)]
 log_colors <- colorRampPalette(rev(brewer.pal(9, "RdBu")))(255)
 anno_col   <- data.frame(condition = coldata$condition, row.names = rownames(coldata))
 png(file.path(opt$plots_dir, "HeatmapDEGPlot.png"),
