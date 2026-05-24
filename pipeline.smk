@@ -173,19 +173,49 @@ checkpoint download_fastq:
             fi
 
             for url in $urls; do
-                local fname out
-                fname=$(basename "$url" .gz)
+                # ENA may return URLs with or without protocol — strip any leading
+                # protocol so we control it ourselves and avoid 'https://https://...'.
+                local clean_url dl_url fname out
+                clean_url=$(echo "$url" | sed -E 's|^[a-z]+://||')
+                dl_url="https://${{clean_url}}"
+                fname=$(basename "$clean_url" .gz)
                 out="fastq_files/$fname"
-                echo "[$srr] Downloading $url" >&2
+
+                # Sanity check: ENA filenames must end in .fastq
+                case "$fname" in
+                    *.fastq) ;;
+                    *) echo "[$srr] WARNING: unexpected ENA filename '$fname' (url=$url); skipping" >&2
+                       continue ;;
+                esac
+
+                echo "[$srr] Downloading $dl_url -> $out" >&2
+
                 if [ "$subsample" -gt 0 ]; then
-                    # Stream + truncate to first N reads (4 lines each). SIGPIPE
-                    # from head closing the pipe is expected; swallow it.
-                    ( curl -sf --retry 3 -L "https://${{url}}" || true ) \
-                        | gunzip \
+                    # Stream + truncate. SIGPIPE upstream (curl, gunzip) when head
+                    # closes the pipe is expected — disable pipefail/errexit locally.
+                    set +eo pipefail
+                    curl -sf --retry 3 -L "$dl_url" 2>/dev/null \
+                        | gunzip 2>/dev/null \
                         | head -n $(( subsample * 4 )) > "$out"
+                    set -eo pipefail
+
+                    if [ ! -s "$out" ]; then
+                        echo "[$srr] ERROR: empty output for $dl_url" >&2
+                        rm -f "$out"
+                        return 1
+                    fi
                 else
-                    curl -sf --retry 3 -L "https://${{url}}" -o "${{out}}.gz"
+                    if ! curl -sf --retry 3 -L "$dl_url" -o "${{out}}.gz"; then
+                        echo "[$srr] ERROR: curl failed for $dl_url" >&2
+                        rm -f "${{out}}.gz"
+                        return 1
+                    fi
                     gunzip -f "${{out}}.gz"
+                    if [ ! -s "$out" ]; then
+                        echo "[$srr] ERROR: gunzip produced empty $out" >&2
+                        rm -f "$out"
+                        return 1
+                    fi
                 fi
             done
         }}
@@ -194,15 +224,25 @@ checkpoint download_fastq:
         xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} -I '{{SRR}}' \
             bash -c 'download_srr "$0" {params.subsample_reads}' '{{SRR}}'
 
-        # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced files.
+        # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced
+        # files. Fail loudly if a SRR has no FASTQ at all (e.g. download failed)
+        # rather than letting it slip through as a misclassified 'single'.
         : > {output.layouts}
+        missing=0
         while read SRR; do
             if [ -f "fastq_files/${{SRR}}_2.fastq" ]; then
                 echo -e "${{SRR}}\tpaired" >> {output.layouts}
-            else
+            elif [ -f "fastq_files/${{SRR}}.fastq" ]; then
                 echo -e "${{SRR}}\tsingle" >> {output.layouts}
+            else
+                echo "ERROR: no FASTQ produced for $SRR" >&2
+                missing=$((missing + 1))
             fi
         done < {output.srr_numbers}
+        if [ "$missing" -gt 0 ]; then
+            echo "ERROR: $missing SRR(s) failed to download — aborting" >&2
+            exit 1
+        fi
         """
 
 
@@ -347,9 +387,12 @@ else:  # parabricks_star
         resources:
             gpu    = 1,
             mem_mb = 80000,
+        params:
+             image = os.environ.get("IMAGE_NAME", "clara-parabricks_4.7.0-1.sif"),
         shell:
             # pbrun rna_fq2bam takes 1 or 2 paths after --in-fq; {input.fastq}
             # expands to a space-separated list, so both layouts Just Work.
+            "apptainer exec --nv {params.image} "
             "pbrun rna_fq2bam "
             "--ref {input.fa} "
             "--genome-lib-dir {input.idx} "

@@ -82,8 +82,22 @@ counts_data <- counts_data[, common_gsm, drop = FALSE]
 coldata     <- coldata[common_gsm, , drop = FALSE]
 
 # Derive condition labels: strip trailing '-<digits>' (e.g. "control-2" → "control")
-condition_raw    <- coldata[[opt$condition_field]]
-coldata$condition <- factor(gsub("-\\d+$", "", condition_raw))
+condition_raw <- coldata[[opt$condition_field]]
+cond_levels   <- gsub("-\\d+$", "", condition_raw)
+
+# Put 'control' (or anything matching it case-insensitively) first so LFC is
+# interpreted as treatment_vs_control. Falls back to alphabetical order if no
+# control-like label is present.
+unique_levels <- unique(cond_levels)
+ctrl_idx <- grep("^(control|ctrl|wildtype|wt|healthy|normal)$",
+                 unique_levels, ignore.case = TRUE)
+if (length(ctrl_idx) >= 1) {
+  ref_level <- unique_levels[ctrl_idx[1]]
+  other     <- setdiff(unique_levels, ref_level)
+  coldata$condition <- factor(cond_levels, levels = c(ref_level, sort(other)))
+} else {
+  coldata$condition <- factor(cond_levels)  # alphabetical fallback
+}
 cat("Condition levels:", paste(levels(coldata$condition), collapse = ", "), "\n")
 cat("Samples per level:\n"); print(table(coldata$condition))
 

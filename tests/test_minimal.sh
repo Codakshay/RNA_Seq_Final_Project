@@ -93,8 +93,9 @@ if [ -f "\$HOME/.bashrc" ]; then
 fi
 set -eu
 
-source "\$(conda info --base)/etc/profile.d/conda.sh"
-conda activate parabricks_env
+export IMAGE_NAME="clara-parabricks_4.7.0-1.sif"
+source "\$(mamba info --base)/etc/profile.d/mamba.sh"
+mamba activate parabricks_env
 
 snakemake --snakefile pipeline.smk --cores 32 --rerun-incomplete --printshellcmds deg_results.csv
 
