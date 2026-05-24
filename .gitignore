@@ -6,5 +6,5 @@ ref_genome/
 transcripts/
 # Windows Alternate Data Stream files created by WSL/Explorer
 *.Identifier
-
+clara-parabricks_4.7.0-1.sif
 tests/output/
