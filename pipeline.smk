@@ -158,9 +158,12 @@ checkpoint download_fastq:
             local srr=$1
             local subsample=$2
             local urls
+            # ENA TSV response includes run_accession by default, so locate the
+            # fastq_ftp column by header name rather than relying on position.
             urls=$(curl -sf --retry 3 \
                 "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${{srr}}&result=read_run&fields=fastq_ftp&format=tsv" \
-                | tail -n +2 | cut -f1 | tr ';' '\n' | grep -v '^$' || true)
+                | awk -F'\t' 'NR==1{{for(i=1;i<=NF;i++) if($i=="fastq_ftp") c=i; next}} c{{print $c}}' \
+                | tr ';' '\n' | grep -v '^$' || true)
 
             if [ -z "$urls" ]; then
                 echo "[$srr] ENA has no FASTQ URLs; falling back to fastq-dump" >&2
@@ -221,7 +224,7 @@ checkpoint download_fastq:
         }}
         export -f download_srr
 
-        xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} -I '{{SRR}}' \
+        xargs -r -a {output.srr_numbers} -P {params.parallel} -I '{{SRR}}' \
             bash -c 'download_srr "$0" {params.subsample_reads}' '{{SRR}}'
 
         # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced
