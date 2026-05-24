@@ -1,0 +1,3 @@
+Submitted batch job 55080
+[test_minimal] Submitted. Workspace: /home/dko/RNA_Seq_Final_Project/tests/output/minimal
+[test_minimal] Tail logs: tail -f /home/dko/RNA_Seq_Final_Project/tests/output/minimal/logs/test_minimal_<jobid>.out
