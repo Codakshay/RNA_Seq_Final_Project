@@ -128,9 +128,17 @@ checkpoint download_fastq:
             sleep 10
         done
 
-        # Optional cap (test mode): keep only the first N SRRs
+        # Optional cap (test mode): take half from head, half from tail of the SRR
+        # list. GEO submissions are almost always grouped by condition, so this
+        # heuristic ensures both groups are represented in the test subset.
         if [ "{params.max_samples}" -gt 0 ]; then
-            head -n {params.max_samples} {output.srr_numbers}.full > {output.srr_numbers}
+            HALF=$(( {params.max_samples} / 2 ))
+            OTHER=$(( {params.max_samples} - HALF ))
+            head -n $HALF {output.srr_numbers}.full > {output.srr_numbers}
+            tail -n $OTHER {output.srr_numbers}.full >> {output.srr_numbers}
+            # Dedup in case head and tail overlap on a small full list
+            awk '!seen[$0]++' {output.srr_numbers} > {output.srr_numbers}.dedup
+            mv {output.srr_numbers}.dedup {output.srr_numbers}
         else
             mv {output.srr_numbers}.full {output.srr_numbers}
         fi

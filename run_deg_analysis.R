@@ -85,6 +85,13 @@ coldata     <- coldata[common_gsm, , drop = FALSE]
 condition_raw    <- coldata[[opt$condition_field]]
 coldata$condition <- factor(gsub("-\\d+$", "", condition_raw))
 cat("Condition levels:", paste(levels(coldata$condition), collapse = ", "), "\n")
+cat("Samples per level:\n"); print(table(coldata$condition))
+
+if (nlevels(coldata$condition) < 2) {
+  stop("Only one condition level present after parsing '", opt$condition_field,
+       "' — DESeq2 requires >=2 levels. Increase MAX_SAMPLES so both groups are sampled, ",
+       "or pick a different --condition-field.", call. = FALSE)
+}
 
 stopifnot(all(colnames(counts_data) == rownames(coldata)))
 
