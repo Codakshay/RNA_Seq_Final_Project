@@ -145,7 +145,7 @@ checkpoint download_fastq:
         # (which accepts -X N) when a subsample cap is requested.
         if [ "{params.subsample_reads}" -gt 0 ]; then
             xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
-                fastq-dump -X {params.subsample_reads} --split-files -O fastq_files
+                fastq-dump -X {params.subsample_reads} --split-3 -O fastq_files
         else
             xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
                 fasterq-dump -e 8 --split-files -O fastq_files
