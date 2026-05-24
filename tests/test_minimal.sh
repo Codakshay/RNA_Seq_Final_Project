@@ -33,7 +33,17 @@ CONDITION_FIELD=title
 MAX_SAMPLES=4
 SUBSAMPLE_READS=50000
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
+if [[ ! -f "$REPO_ROOT/pipeline.smk" ]]; then
+    echo "ERROR: REPO_ROOT=$REPO_ROOT does not contain pipeline.smk" >&2
+    echo "Run: sbatch tests/test_minimal.sh from the repository root." >&2
+    exit 1
+fi
 
 WORKSPACE="$REPO_ROOT/tests/output/minimal"
 mkdir -p "$WORKSPACE/logs"

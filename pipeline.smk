@@ -116,12 +116,17 @@ checkpoint download_fastq:
             export PATH="${{HOME}}/edirect:${{PATH}}"
         fi
 
-        # Fetch the list of SRR run accessions for this BioProject
-        esearch -db sra -query {params.project} \
-            | efetch -format runinfo \
-            | cut -d ',' -f 1 \
-            | tail -n +2 \
-            > {output.srr_numbers}.full
+        # Fetch SRR accessions — retry up to 5 times to handle transient SSL/network errors
+        for attempt in 1 2 3 4 5; do
+            esearch -db sra -query {params.project} \
+                | efetch -format runinfo \
+                | cut -d ',' -f 1 \
+                | tail -n +2 \
+                > {output.srr_numbers}.full
+            [ -s {output.srr_numbers}.full ] && break
+            echo "esearch attempt $attempt returned empty results, retrying in 10s..." >&2
+            sleep 10
+        done
 
         # Optional cap (test mode): keep only the first N SRRs
         if [ "{params.max_samples}" -gt 0 ]; then
@@ -131,13 +136,18 @@ checkpoint download_fastq:
         fi
         rm -f {output.srr_numbers}.full
 
+        if [ ! -s {output.srr_numbers} ]; then
+            echo "ERROR: esearch returned no SRR accessions for {params.project}" >&2
+            exit 1
+        fi
+
         # fasterq-dump does not support read subsampling; fall back to fastq-dump
         # (which accepts -X N) when a subsample cap is requested.
         if [ "{params.subsample_reads}" -gt 0 ]; then
-            xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
+            xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
                 fastq-dump -X {params.subsample_reads} --split-files -O fastq_files
         else
-            xargs -a {output.srr_numbers} -n 1 -P {params.parallel} \
+            xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
                 fasterq-dump -e 8 --split-files -O fastq_files
         fi
 
