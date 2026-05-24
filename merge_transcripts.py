@@ -8,11 +8,19 @@ Usage (called by Snakemake rule merge_results):
         --srr-map data/srr_to_gsm.tsv
 """
 import argparse
+import io
 import os
-import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
+
 from biomart import BiomartServer
 from loguru import logger
-import time
+
+try:
+    import cudf as pd
+    logger.info("cuDF (GPU) available — using GPU-accelerated DataFrames.")
+except ImportError:
+    import pandas as pd
+
 import metadata
 
 # HTSeq-count appends these special summary lines at the end of each output file.
@@ -41,58 +49,28 @@ def _parse_args():
 # BioMart helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_chunk(chunk, dataset, sleep_time=5):
-    """Query BioMart for a list of HGNC symbols.  Returns a list of row-lists."""
-    logger.info(f"Sleeping {sleep_time}s before BioMart query ({len(chunk)} symbols)...")
-    time.sleep(sleep_time)
-    response = dataset.search({
-        'filters': {'hgnc_symbol': chunk},
+def _fetch_all_biomart(gene_symbols):
+    """Fetch BioMart annotation in a single filterless query, then filter locally.
+
+    One connection, no chunking, no sleep — avoids repeated reconnects that
+    trigger Ensembl rate-limiting or 502 errors on large gene lists.
+    """
+    gene_set = set(gene_symbols)
+    logger.info("Connecting to BioMart server (single full-table query)...")
+    server = BiomartServer("http://www.ensembl.org/biomart")
+    hsapiens = server.datasets['hsapiens_gene_ensembl']
+    response = hsapiens.search({
         'attributes': ['ensembl_gene_id', 'hgnc_symbol', 'gene_biotype', 'chromosome_name'],
     })
-    logger.success("BioMart query successful.")
-    lines = response.text.strip().split('\n')
-    return [line.split('\t') for line in lines if line.strip()]
-
-
-def _fetch_data_in_chunks(gene_symbols, chunk_size=500):
-    """Fetch BioMart annotation for all gene_symbols, batching to avoid URL limits."""
-    all_results = []
-    total = len(gene_symbols)
-
-    # First pass: split into chunks of chunk_size
-    raw_chunks = [gene_symbols[i:i + chunk_size] for i in range(0, total, chunk_size)]
-
-    # Second pass: further sub-divide any chunk whose joined length exceeds ~4 000 chars
-    chunks = []
-    for chunk in raw_chunks:
-        joined_len = len(' '.join(chunk))
-        if joined_len >= 4000:
-            n = joined_len // 4000 + 1
-            k, m = divmod(len(chunk), n)
-            for i in range(n):
-                sub = chunk[i * k + min(i, m):(i + 1) * k + min(i + 1, m)]
-                if sub:
-                    chunks.append(sub)
-        else:
-            chunks.append(chunk)
-
-    processed = 0
-    for chunk in chunks:
-        try:
-            logger.info("Connecting to BioMart server...")
-            server = BiomartServer("http://www.ensembl.org/biomart")
-            hsapiens = server.datasets['hsapiens_gene_ensembl']
-            result = _fetch_chunk(chunk, hsapiens)
-            all_results.extend(result)
-        except Exception as exc:
-            logger.error(
-                f"BioMart fetch failed for chunk starting with '{chunk[0]}': {exc}. "
-                "Skipping chunk — those genes will be absent from the count matrix."
-            )
-        processed += len(chunk)
-        logger.info(f"BioMart: {processed}/{total} gene symbols processed.")
-
-    return all_results
+    logger.success("BioMart query complete. Filtering to genes in count matrix...")
+    df = pd.read_csv(
+        io.StringIO(response.text),
+        sep='\t', header=None,
+        names=['Ensembl_ID', 'GeneSymbol', 'Biotype', 'Chromosome'],
+    )
+    df = df[df['GeneSymbol'].isin(gene_set)].reset_index(drop=True)
+    logger.info(f"Retained {len(df)} rows matching {len(gene_set)} query symbols.")
+    return df.values.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +98,7 @@ def build_ensemble_df(transcripts_dir, cache_path):
     gene_symbols = df['Gene'].dropna().unique().tolist()
     logger.info(f"Found {len(gene_symbols)} unique gene symbols; querying BioMart...")
 
-    results = _fetch_data_in_chunks(gene_symbols)
+    results = _fetch_all_biomart(gene_symbols)
     ensemble_df = pd.DataFrame(
         results,
         columns=['Ensembl_ID', 'GeneSymbol', 'Biotype', 'Chromosome'],
@@ -134,29 +112,42 @@ def build_ensemble_df(transcripts_dir, cache_path):
     return ensemble_df
 
 
+def _load_sample(item):
+    """Load one sample CSV and return it indexed by GeneSymbol."""
+    path, gsm = item
+    df = pd.read_csv(path, sep='\t', header=None, names=['GeneSymbol', gsm])
+    df = df[~df['GeneSymbol'].isin(_HTSEQ_SPECIAL)]
+    return df.set_index('GeneSymbol')
+
+
 def build_count_matrix(transcripts_dir, ensemble_df, srr_to_gsm):
     """Inner-join each sample's counts onto the ensemble annotation DataFrame.
 
     Columns in the result: Ensembl_ID, GeneSymbol, Biotype, Chromosome, <GSM_ids…>
+    Samples are loaded in parallel then combined in a single pd.concat pass.
     """
-    merged = ensemble_df.copy()
-
+    tasks = []
     for filename in sorted(os.listdir(transcripts_dir)):
         if not filename.endswith('.csv'):
             continue
-        srr = filename[:-4]  # strip .csv
+        srr = filename[:-4]
         gsm = srr_to_gsm.get(srr)
         if gsm is None:
             logger.warning(f"No GSM mapping for {srr}; skipping sample.")
             continue
+        tasks.append((os.path.join(transcripts_dir, filename), gsm))
 
-        full_path = os.path.join(transcripts_dir, filename)
-        sample_df = pd.read_csv(full_path, sep='\t', header=None,
-                                names=['GeneSymbol', gsm])
-        sample_df = sample_df[~sample_df['GeneSymbol'].isin(_HTSEQ_SPECIAL)]
-        merged = merged.merge(sample_df, how='inner', on='GeneSymbol')
-        logger.info(f"Merged {srr} ({gsm}): {len(merged)} genes remaining.")
+    n_workers = min(len(tasks), os.cpu_count() or 1)
+    logger.info(f"Loading {len(tasks)} sample CSVs with {n_workers} workers...")
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        frames = list(pool.map(_load_sample, tasks))
 
+    counts = pd.concat(frames, axis=1, join='inner')
+    logger.info(f"Combined count matrix: {len(counts)} genes × {len(frames)} samples.")
+
+    counts = counts.reset_index()
+    merged = ensemble_df.merge(counts, how='inner', on='GeneSymbol')
+    logger.info(f"After annotation join: {len(merged)} genes remaining.")
     return merged
 
 
