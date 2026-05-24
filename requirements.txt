@@ -1,3 +1,5 @@
+apptainer
+r
 numpy
 pandas
 biopython
@@ -8,3 +10,7 @@ msgpack
 packaging
 blosc2
 tables
+bioconda::hisat2
+bioconda::subread
+bioconda::samtools
+bioconda::sra-tools

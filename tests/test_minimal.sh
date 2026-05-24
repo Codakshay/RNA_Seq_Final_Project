@@ -49,12 +49,10 @@ done
 if [ "$USE_GPU" -eq 1 ]; then
     ALIGNER=parabricks_star
     GPU_SBATCH="#SBATCH --gres=gpu:ampere:1"
-    EXTRA_MOD="module load parabricks cuda star/2.7.10b subread/2.0.6 samtools/1.17"
     WALLTIME="00:30:00"
 else
     ALIGNER=hisat2
     GPU_SBATCH="# CPU mode — no GPU allocation"
-    EXTRA_MOD="module load hisat2/2.2.1 subread/2.0.6 samtools/1.17"
     WALLTIME="00:45:00"
 fi
 
@@ -82,16 +80,11 @@ set -euo pipefail
 cd "$WORKSPACE"
 
 echo "[test_minimal] aligner=$ALIGNER  walltime=$WALLTIME  samples=$MAX_SAMPLES"
-module load sra-toolkit/3.0.9 python/3.10 r/4.2
-$EXTRA_MOD
 
-ENVDIR=\$(mktemp -d)
-virtualenv --no-download "\$ENVDIR"
-source "\$ENVDIR/bin/activate"
-pip install --no-index --upgrade pip
-pip install -r requirements.txt
+eval "$(mamba shell hook --shell bash)"
+mamba activate rna_seq
 
-snakemake --snakefile pipeline.smk --cores 32 --rerun-incomplete --printshellcmds
+snakemake --snakefile pipeline.smk --cores "${SLURM_CPUS_PER_TASK}" --rerun-incomplete --printshellcmds
 
 # Pass/fail gate
 EXIT_OK=1
@@ -106,8 +99,7 @@ else
     exit 1
 fi
 
-deactivate
-rm -rf "\$ENVDIR"
+echo "[pipeline] Workflow complete."
 EOF
 
 sbatch "$WORKSPACE/run_test.sbatch"

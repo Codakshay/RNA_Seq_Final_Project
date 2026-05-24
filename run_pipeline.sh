@@ -37,13 +37,11 @@ mkdir -p logs
 # Compose the aligner-specific bits
 if [ "$USE_GPU" -eq 1 ]; then
     ALIGNER="parabricks_star"
-    SBATCH_GPU_LINE="#SBATCH --gres=gpu:v100:1"
-    EXTRA_MODULES="module load parabricks cuda star/2.7.10b subread/2.0.6 samtools/1.17"
-    echo "[run_pipeline.sh] GPU mode: aligner=parabricks_star, --gres=gpu:v100:1"
+    SBATCH_GPU_LINE="#SBATCH --gres=gpu:ampere:1"
+    echo "[run_pipeline.sh] GPU mode: aligner=parabricks_star, --gres=gpu:ampere:1"
 else
     ALIGNER="hisat2"
     SBATCH_GPU_LINE="# (CPU mode — no GPU allocation)"
-    EXTRA_MODULES="module load hisat2/2.2.1 subread/2.0.6 samtools/1.17"
     echo "[run_pipeline.sh] CPU mode: aligner=hisat2"
 fi
 
@@ -69,30 +67,18 @@ ${SBATCH_GPU_LINE}
 
 set -euo pipefail
 
-echo "[pipeline] Loading modules..."
-module load sra-toolkit/3.0.9
-module load python/3.10
-module load r/4.2
-${EXTRA_MODULES}
-
-echo "[pipeline] Setting up Python virtual environment..."
-ENVDIR=\$(mktemp -d)
-virtualenv --no-download "\$ENVDIR"
-source "\$ENVDIR/bin/activate"
-
-pip install --no-index --upgrade pip
-pip install -r requirements.txt
+eval "$(mamba shell hook --shell bash)"
+mamba activate rna_seq
 
 echo "[pipeline] Starting Snakemake workflow (aligner=${ALIGNER})..."
+
 snakemake \
     --snakefile pipeline.smk \
-    --cores 32 \
+    --cores "${SLURM_CPUS_PER_TASK}" \
     --rerun-incomplete \
     --printshellcmds
 
-echo "[pipeline] Workflow complete. Cleaning up virtual environment..."
-deactivate
-rm -rf "\$ENVDIR"
+echo "[pipeline] Workflow complete."
 EOF
 
 sbatch run_job.sbatch
