@@ -149,15 +149,50 @@ checkpoint download_fastq:
             exit 1
         fi
 
-        # fasterq-dump does not support read subsampling; fall back to fastq-dump
-        # (which accepts -X N) when a subsample cap is requested.
-        if [ "{params.subsample_reads}" -gt 0 ]; then
-            xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
-                fastq-dump -X {params.subsample_reads} --split-3 -O fastq_files
-        else
-            xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} \
-                fasterq-dump -e 8 --split-files -O fastq_files
-        fi
+        # Download FASTQs from ENA's pre-converted .fastq.gz mirror (much faster
+        # than fasterq-dump, which downloads .sra and locally converts). The
+        # ENA filereport API returns the exact FTP URLs and tells us paired vs
+        # single (1 URL = single, 2 URLs = paired). Fallback to fastq-dump only
+        # if ENA has no record for a given SRR.
+        download_srr() {{
+            local srr=$1
+            local subsample=$2
+            local urls
+            urls=$(curl -sf --retry 3 \
+                "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${{srr}}&result=read_run&fields=fastq_ftp&format=tsv" \
+                | tail -n +2 | cut -f1 | tr ';' '\n' | grep -v '^$' || true)
+
+            if [ -z "$urls" ]; then
+                echo "[$srr] ENA has no FASTQ URLs; falling back to fastq-dump" >&2
+                if [ "$subsample" -gt 0 ]; then
+                    fastq-dump -X "$subsample" --split-3 -O fastq_files "$srr"
+                else
+                    fasterq-dump -e 4 --split-files -O fastq_files "$srr"
+                fi
+                return
+            fi
+
+            for url in $urls; do
+                local fname out
+                fname=$(basename "$url" .gz)
+                out="fastq_files/$fname"
+                echo "[$srr] Downloading $url" >&2
+                if [ "$subsample" -gt 0 ]; then
+                    # Stream + truncate to first N reads (4 lines each). SIGPIPE
+                    # from head closing the pipe is expected; swallow it.
+                    ( curl -sf --retry 3 -L "https://${{url}}" || true ) \
+                        | gunzip \
+                        | head -n $(( subsample * 4 )) > "$out"
+                else
+                    curl -sf --retry 3 -L "https://${{url}}" -o "${{out}}.gz"
+                    gunzip -f "${{out}}.gz"
+                fi
+            done
+        }}
+        export -f download_srr
+
+        xargs -r -a {output.srr_numbers} -n 1 -P {params.parallel} -I '{{SRR}}' \
+            bash -c 'download_srr "$0" {params.subsample_reads}' '{{SRR}}'
 
         # Build layouts.tsv (SRR<TAB>single|paired) by inspecting the produced files.
         : > {output.layouts}
