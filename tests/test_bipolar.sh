@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-# tests/test_minimal.sh
 #
-# Runs the minimum viable end-to-end smoke test: the first 4 SRRs of the
-# bipolar case study (PRJNA316873 / GSE80336) at 5% read scale. Tests the
-# same code path as test_subsampled.sh but with a fraction of the samples, so
-# it completes in ~15 min on CPU. Use this for the fastest possible
-# is-anything-broken check before committing a pipeline change.
-#
-# We deliberately reuse the bipolar BioProject (rather than a different study)
-# because:
-#   - the GEO metadata + condition-field handling is known-good
-#   - we don't need to gamble on the GSE record format for a less-documented
-#     dataset
-#   - paired-end auto-detect is already covered by test_subsampled.sh's
-#     ability to switch BioProjects by editing the constants below
-#
+# bipolar case study
+# We deliberately use the bipolar BioProject
 # Usage:
 #   sbatch tests/test_minimal.sh           # CPU mode
 #   sbatch tests/test_minimal.sh --gpu     # GPU mode (Parabricks STAR)
@@ -45,7 +32,7 @@ if [[ ! -f "$REPO_ROOT/pipeline.smk" ]]; then
     exit 1
 fi
 
-WORKSPACE="$REPO_ROOT/tests/output/minimal"
+WORKSPACE="$REPO_ROOT/tests/output/bipolar"
 mkdir -p "$WORKSPACE/logs"
 
 for f in pipeline.smk merge_transcripts.py metadata.py run_deg_analysis.R requirements.txt; do
@@ -81,52 +68,36 @@ cat > "$WORKSPACE/run_test.sbatch" <<EOF
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=80G
 $GPU_SBATCH
-
 set -euo pipefail
 cd "$WORKSPACE"
-
 echo "[test_minimal] aligner=$ALIGNER  walltime=$WALLTIME  samples=$MAX_SAMPLES"
-
 set +eu
 if [ -f "\$HOME/.bashrc" ]; then
     source "\$HOME/.bashrc"
 fi
 set -eu
-
-export IMAGE_NAME="clara-parabricks_4.7.0-1.sif"
 source "\$(mamba info --base)/etc/profile.d/mamba.sh"
 mamba activate parabricks_env
-
 snakemake --snakefile pipeline.smk --cores 32 --rerun-incomplete --printshellcmds deg_results.csv
-
-# Temporarily lower strict error catching to evaluate the results block safely
-set +e
-
 echo "[test_minimal] Pipeline finished execution. Evaluating output footprints..."
 EXIT_OK=1
-
 if [ ! -f deg_results.csv ]; then
     echo "FAIL: deg_results.csv missing"
     EXIT_OK=0
 fi
-
 for p in PCAPlot MAPlot resMAPlot VolcanoPlot DispersionPlot HeatmapPairwisePlot HeatmapDEGPlot; do
     if [ ! -f "data/plots/\${p}.png" ]; then
         echo "FAIL: data/plots/\${p}.png missing"
         EXIT_OK=0
     fi
 done
-
-# Restore strict error checks
 set -e
-
 if [ "\$EXIT_OK" -eq 1 ]; then
     echo "[test_minimal] ALL PLOTS AND DATA VERIFIED: PASS"
 else
     echo "[test_minimal] PIPELINE EVALUATION OUTCOME: FAIL"
     exit 1
 fi
-
 echo "[pipeline] Workflow complete."
 EOF
 
