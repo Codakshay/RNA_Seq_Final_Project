@@ -30,8 +30,8 @@ USE_GPU=0
 PROJECT_ID=PRJNA318642
 GSE_ACCESSION=GSE80336
 CONDITION_FIELD=title
-MAX_SAMPLES=4
-SUBSAMPLE_READS=5000000
+MAX_SAMPLES=0
+SUBSAMPLE_READS=0
 
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     REPO_ROOT="${SLURM_SUBMIT_DIR}"
@@ -55,11 +55,11 @@ done
 if [ "$USE_GPU" -eq 1 ]; then
     ALIGNER=parabricks_star
     GPU_SBATCH="#SBATCH --gres=gpu:ampere:1"
-    WALLTIME="00:30:00"
+    WALLTIME="24:30:00"
 else
     ALIGNER=hisat2
     GPU_SBATCH="# CPU mode — no GPU allocation"
-    WALLTIME="00:45:00"
+    WALLTIME="30:00:00"
 fi
 
 cat > "$WORKSPACE/config.yaml" <<YAML
@@ -78,8 +78,8 @@ cat > "$WORKSPACE/run_test.sbatch" <<EOF
 #SBATCH --output=$WORKSPACE/logs/test_minimal_%j.out
 #SBATCH --error=$WORKSPACE/logs/test_minimal_%j.err
 #SBATCH --time=$WALLTIME
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=80G
 $GPU_SBATCH
 
 set -euo pipefail
@@ -96,7 +96,7 @@ set -eu
 source "\$(conda info --base)/etc/profile.d/conda.sh"
 conda activate parabricks_env
 
-snakemake --snakefile pipeline.smk --cores 16 --rerun-incomplete --printshellcmds deg_results.csv
+snakemake --snakefile pipeline.smk --cores 32 --rerun-incomplete --printshellcmds deg_results.csv
 
 # Temporarily lower strict error catching to evaluate the results block safely
 set +e
