@@ -48,8 +48,8 @@ fi
 WORKSPACE="$REPO_ROOT/tests/output/quick"
 mkdir -p "$WORKSPACE/logs"
 
-for f in pipeline.smk merge_transcripts.py metadata.py run_deg_analysis.R requirements.txt; do
-    ln -sf "$REPO_ROOT/$f" "$WORKSPACE/$f"
+for f in pipeline.smk merge_transcripts.py metadata.py run_deg_analysis.R requirements.txt clara-parabricks_4.7.0-1.sif; do
+    [ -e "$REPO_ROOT/$f" ] && ln -sf "$REPO_ROOT/$f" "$WORKSPACE/$f"
 done
 
 if [ "$USE_GPU" -eq 1 ]; then
@@ -93,7 +93,7 @@ if [ -f "\$HOME/.bashrc" ]; then
 fi
 set -eu
 
-export IMAGE_NAME="clara-parabricks_4.7.0-1.sif"
+export IMAGE_NAME="$REPO_ROOT/clara-parabricks_4.7.0-1.sif"
 source "\$(mamba info --base)/etc/profile.d/mamba.sh"
 mamba activate parabricks_env
 
