@@ -55,11 +55,11 @@ done
 if [ "$USE_GPU" -eq 1 ]; then
     ALIGNER=parabricks_star
     GPU_SBATCH="#SBATCH --gres=gpu:ampere:1"
-    WALLTIME="00:30:00"
+    WALLTIME="06:50:00"
 else
     ALIGNER=hisat2
     GPU_SBATCH="# CPU mode — no GPU allocation"
-    WALLTIME="01:00:00"
+    WALLTIME="08:00:00"
 fi
 
 cat > "$WORKSPACE/config.yaml" <<YAML
@@ -94,7 +94,7 @@ fi
 set -eu
 
 export IMAGE_NAME="$REPO_ROOT/clara-parabricks_4.7.0-1.sif"
-source "\$(mamba info --base)/etc/profile.d/mamba.sh"
+source "\$(conda info --base)/etc/profile.d/conda.sh"
 mamba activate parabricks_env
 
 snakemake --snakefile pipeline.smk --cores 16 --rerun-incomplete --printshellcmds deg_results.csv

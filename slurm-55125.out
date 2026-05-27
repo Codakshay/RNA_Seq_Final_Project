@@ -1,3 +1,0 @@
-Submitted batch job 55126
-[test_quick] Submitted. Workspace: /home/dko/RNA_Seq_Final_Project/tests/output/quick
-[test_quick] Tail logs: tail -f /home/dko/RNA_Seq_Final_Project/tests/output/quick/logs/test_quick_<jobid>.out

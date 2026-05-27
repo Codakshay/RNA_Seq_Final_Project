@@ -400,7 +400,8 @@ else:  # parabricks_star
             "--ref {input.fa} "
             "--genome-lib-dir {input.idx} "
             "--in-fq {input.fastq} "
-            "--out-bam {output}"
+            "--out-bam "
+            "--output-dir {output}"
 
 
 ########################################

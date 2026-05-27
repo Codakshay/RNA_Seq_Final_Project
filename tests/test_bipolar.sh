@@ -76,7 +76,7 @@ if [ -f "\$HOME/.bashrc" ]; then
     source "\$HOME/.bashrc"
 fi
 set -eu
-source "\$(mamba info --base)/etc/profile.d/mamba.sh"
+source "\$(conda info --base)/etc/profile.d/conda.sh"
 mamba activate parabricks_env
 snakemake --snakefile pipeline.smk --cores 32 --rerun-incomplete --printshellcmds deg_results.csv
 echo "[test_minimal] Pipeline finished execution. Evaluating output footprints..."
